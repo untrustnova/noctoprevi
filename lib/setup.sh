@@ -304,20 +304,26 @@ nc_cmd_doctor() {
     nc_check_dep jq "opsional, untuk output multi-monitor" ||
         nc_doctor_info "jq tidak ada, output monitor tidak dideteksi"
 
-    printf '\nIdle daemon\n'
-    local daemon
+    printf '\nIdle\n'
+    printf '  %-16s %ss\n' "screensaver" "$NC_IDLE_START_SEC"
+    printf '  %-16s %ss\n' "lockscreen" "$NC_IDLE_LOCK_SEC"
+
+    local daemon conf
     daemon="$(nc_detect_idle_daemon)"
     if [ -n "$daemon" ]; then
-        nc_doctor_ok "terdeteksi: $daemon"
-        local conf
-        conf="$(nc_idle_conf_path "$daemon")"
-        if [ -f "$conf" ] && grep -qF "$NC_HYPRIDLE_BEGIN" "$conf" 2>/dev/null; then
-            nc_doctor_ok "blok noctoprevi terpasang di $conf"
-        else
-            nc_doctor_warn "belum terpasang, jalankan: $NC_APP install --idle-daemon $daemon"
-        fi
+        printf '  %-16s %s\n' "daemon" "$daemon"
     else
-        nc_doctor_warn "hypridle/swayidle tidak ditemukan"
+        printf '  %-16s %s\n' "daemon" "tidak ditemukan"
+        nc_doctor_warn "hypridle atau swayidle belum terpasang"
+        printf '        sudo pacman -S swayidle\n'
+    fi
+
+    conf="$(nc_idle_conf_path "${daemon:-swayidle}")"
+    if [ -f "$conf" ] && grep -qF "$NC_HYPRIDLE_BEGIN" "$conf" 2>/dev/null; then
+        nc_doctor_ok "blok noctoprevi terpasang di $conf"
+    else
+        printf '  %-16s %s\n' "blok idle" "belum terpasang"
+        printf '        %s install --idle-daemon %s\n' "$NC_APP" "${daemon:-swayidle}"
     fi
 
     printf '\nLockscreen\n'
@@ -343,7 +349,13 @@ nc_cmd_doctor() {
     printf '  %-16s %s\n' "AUDIO" "$NC_AUDIO"
     printf '  %-16s %s\n' "MONITOR_MODE" "$NC_MONITOR_MODE"
     printf '  %-16s %s\n' "CURSOR_AUTOHIDE" "$NC_CURSOR_AUTOHIDE"
+    printf '  %-16s %s\n' "VIDEO_FPS_LIMIT" "$(
+        [ "${NC_VIDEO_FPS_LIMIT:-0}" -gt 0 ] 2>/dev/null &&
+            printf '%s fps' "$NC_VIDEO_FPS_LIMIT" || printf 'mati (semua frame)'
+    )"
     printf '  %-16s %s\n' "RETRY_LIMIT" "$NC_RETRY_LIMIT"
+    printf '  %-16s %s (%ss min)\n' "VALIDATE_MEDIA" "$NC_VALIDATE_MEDIA" "$NC_MIN_DURATION_SEC"
+    printf '  %-16s %s\n' "AERIALS_TRUST" "$NC_AERIALS_TRUST"
     printf '  %-16s %s\n' "LOG" "$NC_LOG_TARGET${NC_LOG_FILE:+ -> $NC_LOG_FILE}"
     if [ -n "$NC_CFG_UNKNOWN" ]; then
         nc_doctor_warn "key config tidak dikenal: $NC_CFG_UNKNOWN"
@@ -408,8 +420,56 @@ nc_cmd_doctor() {
     return "$rc"
 }
 
+nc_bench_escalation_sweep() {
+    local -i runs="${1:-6}"
+    local -a points=(0 5 10 20 50 100)
+    local -a samples=()
+    local -i p i t0 t1 ms sum live=0
+    local orig="$NC_STOP_IPC_WAIT_MS"
+
+    local media
+    media="$(nc_media_count_quick)"
+    if [ "$media" -eq 0 ]; then
+        nc_log_error "tidak ada media di $NC_VIDEO_DIR, sweep dibatalkan"
+        return "$NC_EXIT_ERROR"
+    fi
+
+    printf 'Escalation sweep: %d putaran per titik, total %d siklus.\n' \
+        "$runs" "$(( runs * ${#points[@]} ))"
+    printf 'STOP_IPC_WAIT_MS mengukur berapa lama menunggu IPC quit\n'
+    printf 'sebelum naik ke SIGTERM. 0 = langsung SIGTERM.\n\n'
+    printf '%-20s %-10s %-10s %-10s\n' "STOP_IPC_WAIT_MS" "p50(ms)" "p95(ms)" "maks(ms)"
+
+    for p in "${points[@]}"; do
+        NC_STOP_IPC_WAIT_MS="$p"
+        samples=()
+        for (( i = 1; i <= runs; i++ )); do
+            nc_cmd_start >/dev/null 2>&1
+            nc_pid_alive "$(nc_supervisor_pid 2>/dev/null)" && live=$(( live + 1 ))
+            sleep 0.3
+            t0="$(nc_now_us)"
+            nc_cmd_stop >/dev/null 2>&1
+            t1="$(nc_now_us)"
+            ms=$(( (t1 - t0) / 1000 ))
+            samples+=("$ms")
+        done
+        printf '  %-16s mentah: %-28s (supervisor hidup %s/%s)\n' \
+            "$p" "${samples[*]}" "$live" "$runs"
+        nc_bench_stats "$p" "" "${samples[@]}"
+        live=0
+    done
+
+    NC_STOP_IPC_WAIT_MS="$orig"
+    printf '\n'
+    printf 'Angka di atas adalah waktu total perintah `stop` dari luar, jadi\n'
+    printf 'sudah termasuk start-up CLI. Bandingkan antar titik, bukan\n'
+    printf 'dengan angka di dokumentasi - itu dari mesin lain.\n'
+    return "$NC_EXIT_OK"
+}
+
 nc_cmd_bench() {
     local -i runs=10
+    local sweep=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --runs | -n)
@@ -419,11 +479,17 @@ nc_cmd_bench() {
                 esac
                 shift
                 ;;
+            --escalation-sweep | --sweep) sweep=1; shift ;;
             [0-9]*) runs="$1" ;;
         esac
         shift
     done
     [ "$runs" -ge 1 ] && [ "$runs" -le 200 ] || runs=10
+
+    if [ "$sweep" -eq 1 ]; then
+        nc_bench_escalation_sweep "$runs"
+        return $?
+    fi
 
     local media_count
     media_count="$(nc_media_count_quick)"
@@ -457,8 +523,8 @@ nc_cmd_bench() {
     done
 
     printf '\n'
-    nc_bench_stats "stop" "${stops[@]}" "$NC_STOP_IPC_WAIT_MS"
-    nc_bench_stats "total" "${totals[@]}" ""
+    nc_bench_stats "stop" "$NC_STOP_IPC_WAIT_MS" "${stops[@]}"
+    nc_bench_stats "total" "" "${totals[@]}"
     return "$NC_EXIT_OK"
 }
 
@@ -502,4 +568,359 @@ nc_media_count_quick() {
         [ -f "$f" ] && n=$(( n + 1 ))
     done
     printf '%s' "$n"
+}
+
+# ---------------------------------------------------------------- check
+
+# `doctor` menjawab "dependensi ada?". `check` menjawab "ini benar-benar
+# akan jalan?", dengan menelusuri hal-hal yang tidak terlihat dari daftar
+# dependensi: apakah tiap file benar-benar bisa didecode, apakah ambang idle
+# masuk akal, apakah compositor mau menerima jendelanya.
+nc_check_summary_fail=0
+nc_check_summary_warn=0
+
+nc_check_fail() {
+    printf '  %sFAIL%s  %s\n' "$NC_TUI_C_RED" "$NC_TUI_C_RESET" "$*"
+    nc_check_summary_fail=$(( nc_check_summary_fail + 1 ))
+    return 0
+}
+
+nc_check_warn() {
+    printf '  %sWARN%s  %s\n' "$NC_TUI_C_YELLOW" "$NC_TUI_C_RESET" "$*"
+    nc_check_summary_warn=$(( nc_check_summary_warn + 1 ))
+    return 0
+}
+
+nc_check_ok() {
+    printf '  %sOK%s    %s\n' "$NC_TUI_C_GREEN" "$NC_TUI_C_RESET" "$*"
+    return 0
+}
+
+nc_check_section() {
+    printf '\n%s%s%s\n' "$NC_TUI_C_BOLD" "$*" "$NC_TUI_C_RESET"
+}
+
+nc_check_idle() {
+    nc_check_section "Idle thresholds"
+    if [ "$NC_IDLE_START_SEC" -lt 120 ] 2>/dev/null; then
+        nc_check_warn "IDLE_START_SEC=${NC_IDLE_START_SEC}s terlalu pendek; layar akan berkedip saat membaca"
+        nc_anomaly_emit "$NC_SEV_WARN" "IDLE_TOO_SHORT" \
+            "IDLE_START_SEC=${NC_IDLE_START_SEC}s di bawah 120s" \
+            "naikkan ke 600 atau lebih; layar berkedip setiap idle timeout"
+    else
+        nc_check_ok "screensaver menyala setelah ${NC_IDLE_START_SEC}s"
+    fi
+    if [ "$NC_IDLE_LOCK_SEC" -le "$NC_IDLE_START_SEC" ] 2>/dev/null; then
+        nc_check_warn "IDLE_LOCK_SEC=${NC_IDLE_LOCK_SEC}s <= IDLE_START_SEC=${NC_IDLE_START_SEC}s; lockscreen akan muncul hampir bersamaan"
+    else
+        nc_check_ok "lockscreen setelah ${NC_IDLE_LOCK_SEC}s"
+    fi
+}
+
+nc_check_outputs() {
+    nc_check_section "Output monitor"
+    if nc_detect_outputs; then
+        local o
+        for o in "${NC_OUTPUTS[@]}"; do
+            nc_check_ok "$o aktif"
+        done
+        if [ "${#NC_OUTPUTS[@]}" -gt 1 ] && [ "$NC_MONITOR_MODE" != "all" ]; then
+            nc_check_warn "${#NC_OUTPUTS[@]} output aktif tapi MONITOR_MODE=$NC_MONITOR_MODE; hanya satu yang akan tertutup"
+        fi
+        if [ "$NC_MONITOR_MODE" = "all" ]; then
+            nc_check_warn "MONITOR_MODE=all bergantung compositor menaruh jendela;mpv tidak bisa memilih output di Wayland"
+        fi
+    else
+        nc_check_warn "tidak bisa mendeteksi output monitor"
+    fi
+}
+
+nc_check_hwdec() {
+    nc_check_section "Akselerasi"
+    if [ ! -d /dev/dri ]; then
+        nc_check_warn "tidak ada /dev/dri; dekode akan jatuh ke software"
+        return 0
+    fi
+    if ! nc_have mpv; then
+        nc_check_fail "mpv tidak ditemukan"
+        return 0
+    fi
+
+    # Decode nyata beberapa frame dari satu file representative, lalu tanya
+    # mpv hwdec apa yang benar-benar terpakai. static config tidak bisa
+    # memastikan ini - beberapa kombinasi driver diam-diam mundur ke software.
+    local sample="" f
+    for f in "$NC_VIDEO_DIR"/*; do
+        [ -f "$f" ] || continue
+        sample="$f"
+        break
+    done
+    if [ -z "$sample" ]; then
+        nc_check_warn "tidak ada file untuk menguji dekode"
+        return 0
+    fi
+
+    local out
+    out="$(timeout 30 mpv --no-config --no-terminal --really-quiet \
+        --hwdec="$NC_HWDEC" --vo=null --ao=null \
+        --frames=20 --no-audio "$sample" 2>&1)"
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        nc_check_fail "mpv gagal decode contoh dengan HWDEC=$NC_HWDEC"
+        [ -n "$out" ] && printf '        %s\n' "$(printf '%s' "$out" | head -2)"
+        return 0
+    fi
+    nc_check_ok "decode 20 frame dengan HWDEC=$NC_HWDEC"
+    return 0
+}
+
+nc_check_media() {
+    nc_check_section "Media"
+    if [ ! -d "$NC_VIDEO_DIR" ]; then
+        nc_check_fail "VIDEO_DIR tidak ada: $NC_VIDEO_DIR"
+        return 0
+    fi
+
+    local -i total=0 bad=0 unreadable=0
+    local f="" sz=0
+    local -a broken=()
+    for f in "$NC_VIDEO_DIR"/*; do
+        [ -f "$f" ] || continue
+        total=$(( total + 1 ))
+        if [ ! -r "$f" ] || [ ! -s "$f" ]; then
+            unreadable=$(( unreadable + 1 ))
+            continue
+        fi
+        if nc_media_probe "$f"; then
+            continue
+        fi
+        bad=$(( bad + 1 ))
+        [ "${#broken[@]}" -lt 5 ] && broken+=("$(nc_anomaly_basename "$f")")
+    done
+
+    if [ "$total" -eq 0 ]; then
+        nc_check_fail "tidak ada file video di $NC_VIDEO_DIR"
+        nc_check_warn "isi dengan: $NC_APP aerials --sync"
+        return 0
+    fi
+
+    if [ "$unreadable" -gt 0 ]; then
+        nc_check_fail "$unreadable file kosong atau tidak bisa dibaca"
+    fi
+    if [ "$bad" -gt 0 ]; then
+        nc_check_fail "$bad dari $total file gagal divalidasi (VALIDATE_MEDIA=$NC_VALIDATE_MEDIA)"
+        for f in "${broken[@]}"; do
+            printf '        - %s\n' "$f"
+        done
+        nc_check_warn "file-file itu akan dicoba lalu dilewati tiap start; hapus atau ganti"
+    fi
+    if [ "$unreadable" -eq 0 ] && [ "$bad" -eq 0 ]; then
+        nc_check_ok "semua $total file lolos validasi"
+    fi
+    return 0
+}
+
+nc_check_socket() {
+    nc_check_section "Runtime"
+    if nc_is_running; then
+        nc_check_ok "screensaver aktif (supervisor $(nc_supervisor_pid 2>/dev/null))"
+    else
+        nc_check_ok "tidak aktif"
+    fi
+
+    if [ -S "$NC_SOCK" ]; then
+        local mode
+        mode="$(stat -c '%a' "$NC_SOCK" 2>/dev/null)"
+        case "$mode" in
+            6?? | 7??) nc_check_ok "socket $NC_SOCK (mode=$mode)" ;;
+            *)
+                nc_check_fail "socket terlalu terbuka: mode=$mode"
+                nc_anomaly_emit "$NC_SEV_WARN" "SOCKET_PERMISSIONS" \
+                    "socket IPC mode=$mode, seharusnya 600/700" \
+                    "periksa izin $XDG_RUNTIME_DIR" "mode=$mode"
+                ;;
+        esac
+        if ! nc_ipc_property "$NC_SOCK" "idle-active" 0.5 >/dev/null 2>&1; then
+            nc_check_warn "socket ada tapi tidak menjawab"
+            nc_anomaly_emit "$NC_SEV_WARN" "IPC_UNREACHABLE" \
+                "socket IPC tidak menjawab get_property" \
+                "naikkan STARTUP_GRACE_MS, atau cek log" "sock=$NC_SOCK"
+        fi
+    else
+        nc_check_ok "tidak ada socket (normal saat tidak aktif)"
+    fi
+
+    local health
+    health="$(nc_anomaly_health)"
+    if [ "$health" -ge 80 ] 2>/dev/null; then
+        nc_check_ok "health $health/100"
+    else
+        nc_check_warn "health $health/100; lihat: $NC_APP anomalies --since all"
+    fi
+    return 0
+}
+
+nc_cmd_check() {
+    nc_tui_setup_colors
+    printf '%snoctoprevi check%s  %s\n\n' "$NC_TUI_C_BOLD" "$NC_TUI_C_RESET" \
+        "preflight: apakah screensaver ini benar-benar akan jalan"
+    nc_check_summary_fail=0
+    nc_check_summary_warn=0
+
+    nc_check_idle
+    nc_check_outputs
+    nc_check_hwdec
+    nc_check_media
+    nc_check_socket
+
+    printf '\n--------------------------------------------------------------------------------\n'
+    if [ "$nc_check_summary_fail" -gt 0 ]; then
+        printf '%s%d problem%s, %s%d peringatan%s\n' \
+            "$NC_TUI_C_RED" "$nc_check_summary_fail" "$NC_TUI_C_RESET" \
+            "$NC_TUI_C_YELLOW" "$nc_check_summary_warn" "$NC_TUI_C_RESET"
+        return "$NC_EXIT_ERROR"
+    fi
+    if [ "$nc_check_summary_warn" -gt 0 ]; then
+        printf '%ssiap, dengan %s peringatan%s\n' \
+            "$NC_TUI_C_YELLOW" "$nc_check_summary_warn" "$NC_TUI_C_RESET"
+        return "$NC_EXIT_OK"
+    fi
+    printf '%sSemua bersih.%s\n' "$NC_TUI_C_GREEN" "$NC_TUI_C_RESET"
+    return "$NC_EXIT_OK"
+}
+
+# --------------------------------------------------------------- selftest
+
+# Pola uji untuk memastikan tiap monitor benar-benar tertutup. Penting untuk
+# penyiapan multi-monitor: mpv tidak bisa memilih output di Wayland, jadi
+# "tidak tahu apakah semua monitor ketutup" adalah kondisi yang sangat
+# mungkin terjadi dan tidak terlihat kalau tidak diuji.
+#
+# Setiap output mendapat satu berkas .mp4 berbeda: SMPTE bars plus penanda
+# bergerak, dan nama file-nya berisi nomor output. Setelah selesai, tinggal
+# lihat layar: pola dan nomornya harus cocok dengan monitor yang kamu lihat.
+# Klip pendek yang di-loop mpv (--loop-file=inf). Slaman 1 jam hanya
+# memperlambat encoding tanpa menambah nilai uji.
+nc_selftest_build() {
+    local out="$1" secs="$2" w="${3:-1920}" h="${4:-1080}"
+    ffmpeg -nostdin -loglevel error -y \
+        -f lavfi -i "smptebars=size=${w}x${h}:rate=15:duration=$secs" \
+        -f lavfi -i "testsrc2=size=320x180:rate=15:duration=$secs" \
+        -filter_complex "[0:v][1:v]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2" \
+        -c:v libx264 -preset ultrafast -crf 32 -pix_fmt yuv420p \
+        -t "$secs" "$out" 2>/dev/null
+}
+
+nc_cmd_selftest() {
+    nc_tui_setup_colors
+
+    local -i duration=30
+    local -a targets=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --duration | -t)
+                case "${2:-}" in
+                    '' | *[!0-9]*) duration=30 ;;
+                    *) duration="$2" ;;
+                esac
+                shift 2
+                ;;
+            *) shift ;;
+        esac
+    done
+
+    nc_have ffmpeg || {
+        nc_log_error "ffmpeg dibutuhkan untuk membuat pola uji"
+        printf '  %sFAIL%s  ffmpeg tidak ditemukan\n' "$NC_TUI_C_RED" "$NC_TUI_C_RESET"
+        return "$NC_EXIT_ERROR"
+    }
+
+    local workdir="${nc_selftest_dir_default:-$NC_STATE_DIR/selftest}"
+    mkdir -p "$workdir" 2>/dev/null || {
+        nc_log_error "gagal membuat $workdir"
+        return "$NC_EXIT_ERROR"
+    }
+
+    printf '%snoctoprevi selftest%s\n\n' "$NC_TUI_C_BOLD" "$NC_TUI_C_RESET"
+    printf 'Pola uji untuk memastikan tiap monitor tertutup. Setiap output\n'
+    printf 'diberi satu berkas dengan nomor berbeda, jadi mudah dicocokkan.\n\n'
+
+    local -a outputs=()
+    if nc_detect_outputs; then
+        outputs=("${NC_OUTPUTS[@]}")
+    fi
+    if [ "${#outputs[@]}" -eq 0 ]; then
+        printf '  %sWARN%s  tidak ada output terdeteksi; memakai 2 output virtual\n' \
+            "$NC_TUI_C_YELLOW" "$NC_TUI_C_RESET"
+        outputs=(output-0 output-1)
+    fi
+
+    local o="" i="" idx=""
+    for (( i = 0; i < ${#outputs[@]}; i++ )); do
+        o="${outputs[i]}"
+        idx="$i"
+        local file=""
+        file="$workdir/$(printf 'selftest-%02d' "$idx").mp4"
+        printf '  %s[1]%s %-16s -> %s\n' "$NC_TUI_C_CYAN" "$NC_TUI_C_RESET" "$o" \
+            "$(nc_tui_short_path "$file")"
+        if nc_selftest_build "$file" "$duration"; then
+            printf '      %sselesai%s\n' "$NC_TUI_C_GREEN" "$NC_TUI_C_RESET"
+        else
+            printf '      %sgagal membuat pola%s\n' "$NC_TUI_C_RED" "$NC_TUI_C_RESET"
+            return "$NC_EXIT_ERROR"
+        fi
+        targets+=("$file")
+    done
+
+    printf '\n'
+    printf 'Menjalankan screensaver. Perhatikan setiap monitor:\n'
+    printf '  - nomor di tengah layar HARUS cocok dengan urutan output di atas\n'
+    printf '  - tidak boleh ada monitor yang tetap menampilkan WALLPAPER\n'
+    printf '  - kotak bergerak di tengah = video hidup, kalau beku decode-nya macet\n\n'
+    printf 'Mulai sekarang? [y/N] '
+    local go=""
+    read -r go || true
+    case "$(printf '%s' "$go" | tr 'A-Z' 'a-z')" in
+        y | yes) ;;
+        *)
+            printf 'Dibatalkan. Berkas pola ada di: %s\n' "$workdir"
+            printf 'Untuk dipakai manual, taruh salah satunya di VIDEO_DIR lalu:\n'
+            printf '  %s start\n\n' "$NC_APP"
+            return "$NC_EXIT_OK"
+            ;;
+    esac
+
+    local bak=""
+    bak="$NC_STATE_DIR/selftest-config.$$"
+    if [ -f "$NC_CONFIG_FILE" ]; then
+        cp -f "$NC_CONFIG_FILE" "$bak" 2>/dev/null
+    fi
+    # Config ditimpa hanya selama selftest berjalan. Kalau proses ini
+    # terputus di tengah - timeout, Ctrl-C, terminal ditutup - config asli
+    # harus tetap dikembalikan. Tanpa trap, configmu akan selamanya
+    # menunjuk folder pola uji.
+    nc_selftest_restore() {
+        [ -n "$bak" ] || return 0
+        [ -f "$bak" ] || return 0
+        mv -f "$bak" "$NC_CONFIG_FILE" 2>/dev/null
+        printf '\nConfig dipulihkan.\n'
+    }
+    trap 'nc_selftest_restore' INT TERM HUP
+    trap 'nc_selftest_restore; exit 130' INT
+    trap 'nc_selftest_restore; exit 143' TERM
+
+    printf 'VIDEO_DIR=%s\nPLAYBACK_MODE=sequential\nVALIDATE_MEDIA=0\nLOG_LEVEL=error\n' \
+        "$workdir" >"$NC_CONFIG_FILE" 2>/dev/null
+
+    nc_cmd_start
+    sleep 2
+    printf 'Ctrl-C untuk berhenti, atau Enter setelah selesai.\n'
+    read -r _ || true
+    nc_cmd_stop
+
+    trap - INT TERM HUP
+    nc_selftest_restore
+    printf 'Pola uji tetap ada di: %s\n' "$workdir"
+    printf 'Hapus dengan: rm -rf %s\n\n' "$workdir"
+    return "$NC_EXIT_OK"
 }

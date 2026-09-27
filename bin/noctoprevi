@@ -71,7 +71,7 @@ if ! nc_resolve_self; then
     exit 2
 fi
 
-for _nc_mod in core log config media ipc runtime cmd setup aerials; do
+for _nc_mod in core log config anomaly anomaly_cmd tui media ipc runtime cmd setup aerials; do
     _nc_file="$NC_LIB_DIR/$_nc_mod.sh"
     if [ ! -r "$_nc_file" ]; then
         printf '%s: modul tidak ditemukan: %s\n' "$NC_APP" "$_nc_file" >&2
@@ -88,6 +88,7 @@ nc_config_defaults
 nc_config_load
 nc_config_validate
 nc_log_init
+nc_config_flush_warnings
 nc_config_ext_array
 
 nc_usage() {
@@ -100,6 +101,9 @@ PEMAKAIAN
   $bin <perintah> [opsi]
 
 PERINTAH
+  (tanpa argumen)  Buka antarmuka terminal (TUI) kalau dijalankan di terminal
+
+PERINTAH UTAMA
   start            Mulai screensaver video fullscreen (singleton, FR-01)
   stop             Hentikan screensaver dan bersihkan socket (target <150ms)
   toggle           Nyala jika mati, mati jika nyala
@@ -196,10 +200,17 @@ nc_main() {
         esac
     done
 
-    [ -n "$cmd" ] || {
+    if [ -z "$cmd" ]; then
+        # Tanpa subcommand: buka TUI kalau memang di terminal, kalau tidak
+        # tampilkan bantuan. Sama seperti nocatoo, tapi lebih dihati-hati -
+        # `clear` di non-TTY merusak keluaran yang di-pipe.
+        if [ -t 1 ]; then
+            nc_tui_main
+            exit $?
+        fi
         nc_usage
         exit "$NC_EXIT_USAGE"
-    }
+    fi
 
     NC_FORCE="$force"
     NC_QUIET="$quiet"
@@ -214,6 +225,11 @@ nc_main() {
         next) nc_cmd_next; exit $? ;;
         prev) nc_cmd_prev; exit $? ;;
         status) nc_cmd_status "${rest[0]:-}"; exit $? ;;
+        anomalies | anomaly) nc_anomalies_cmd "${rest[@]}"; exit $? ;;
+        tui | ui) nc_tui_main "${rest[@]}"; exit $? ;;
+        watch) nc_tui_watch "${rest[@]}"; exit $? ;;
+        check) nc_cmd_check "${rest[@]}"; exit $? ;;
+        selftest) nc_cmd_selftest "${rest[@]}"; exit $? ;;
         doctor) nc_cmd_doctor; exit $? ;;
         bench) nc_cmd_bench "${rest[@]}"; exit $? ;;
         install) nc_cmd_install "${rest[@]}"; exit $? ;;

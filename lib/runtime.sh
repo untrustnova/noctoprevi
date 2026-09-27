@@ -15,11 +15,24 @@ NC_MAX_SOCKETS=8
 NC_CHILD_PIDS=()
 
 NC_LOCK_FD=200
+NC_LOCK_HELD=0
 
 nc_singleton_try_lock() {
     [ -d "$NC_RUNTIME_DIR" ] || mkdir -p "$NC_RUNTIME_DIR" 2>/dev/null
     { eval "exec ${NC_LOCK_FD}>\"\$NC_LOCKFILE\""; } 2>/dev/null || return 1
     flock -n "$NC_LOCK_FD" 2>/dev/null || return 1
+    NC_LOCK_HELD=1
+    return 0
+}
+
+# Lepaskan lock yang dipegang proses ini. Supervisor mewarisi fd yang sama,
+# jadi lock baru benar-benar bebas setelah supervisor mati - kalau proses ini
+# tetap membukanya, start berikutnya di proses yang sama akan mengira
+# instance lain masih jalan dan tidak melakukan apa-apa.
+nc_lock_release() {
+    [ "$NC_LOCK_HELD" -eq 1 ] || return 0
+    eval "exec ${NC_LOCK_FD}>&-" 2>/dev/null
+    NC_LOCK_HELD=0
     return 0
 }
 
@@ -88,11 +101,13 @@ nc_sock_is_stale() {
 
 nc_remove_runtime_files() {
     local -i n i
+    local -a files=()
     n="$(nc_instance_count)"
     for (( i = 0; i <= n && i < NC_MAX_SOCKETS; i++ )); do
-        rm -f "$(nc_ipc_sock_for "$i")" "$(nc_mpv_pid_file "$i")" 2>/dev/null
+        files+=("$(nc_ipc_sock_for "$i")" "$(nc_mpv_pid_file "$i")")
     done
-    rm -f "$NC_PIDFILE" "$NC_INDEX_FILE" "$NC_MEDIA_FILE" "$(nc_inst_file)" 2>/dev/null
+    files+=("$NC_PIDFILE" "$NC_INDEX_FILE" "$NC_MEDIA_FILE" "$(nc_inst_file)")
+    rm -f "${files[@]}" 2>/dev/null
     return 0
 }
 
@@ -197,6 +212,15 @@ nc_build_mpv_argv() {
     NC_ARGV+=(--no-keepaspect)
     NC_ARGV+=(--no-input-terminal)
     NC_ARGV+=(--osd-level="$NC_OSD_LEVEL")
+
+    # Batas fps. PENTING: ini bukan penghematan decode. VA-API tetap
+    # men-decode semua frame; yang berkurang hanya pemrosesan presentasi.
+    # Penghematan nyata untuk baterai datang dari clip 30fps, bukan dari
+    # option ini - lihat README bagian "Baterai".
+    case "${NC_VIDEO_FPS_LIMIT:-0}" in
+        0) ;;
+        *) NC_ARGV+=(--video-sync=display-vdrop --untimed) ;;
+    esac
     NC_ARGV+=(--really-quiet)
 
     [ "$NC_FULLSCREEN" -eq 1 ] && NC_ARGV+=(--fullscreen)
@@ -323,17 +347,29 @@ nc_supervise_main() {
         file="$(nc_media_pick_from_order "$NC_ORDER_FILE" "$NC_INDEX_FILE" "$previous")"
         if [ -z "$file" ]; then
             nc_log_error "tidak ada media yang bisa diputar"
+            nc_anomaly_emit "$NC_SEV_ERROR" "MEDIA_EMPTY_DIR" \
+                "tidak ada media yang bisa diputar di $NC_VIDEO_DIR" \
+                "isi VIDEO_DIR, atau jalankan: $NC_APP aerials --sync" \
+                "dir=$NC_VIDEO_DIR"
             nc_log_error "isi $NC_VIDEO_DIR dengan .mp4/.mkv/.webm/.mov, atau jalankan: $NC_APP aerials --sync"
             exit "$NC_EXIT_ERROR"
         fi
 
-        if [ "$NC_VALIDATE_MEDIA" -eq 1 ] && ! nc_media_probe "$file"; then
+        if [ "$NC_VALIDATE_MEDIA" -ge 1 ] && ! nc_media_probe "$file"; then
             nc_log_warn "bukan video yang bisa dibaca, dilewati: $file"
+            nc_anomaly_emit "$NC_SEV_WARN" "MEDIA_REJECTED" \
+                "media tidak lolos validasi, dilewati" \
+                "unduh ulang, atau set VALIDATE_MEDIA=1 untuk menerimanya" \
+                "file=$(nc_anomaly_basename "$file")"
             previous="$file"
             attempts=$(( attempts + 1 ))
             nc_media_write_index "$NC_INDEX_FILE" "$(( $(nc_media_read_index "$NC_INDEX_FILE") + 1 ))"
             if [ "$attempts" -gt "$NC_RETRY_LIMIT" ]; then
                 nc_log_error "$attempts file tidak valid berturut-turut, keluar"
+                nc_anomaly_emit "$NC_SEV_ERROR" "MEDIA_EMPTY_DIR" \
+                    "$attempts file tidak valid berturut-turut, tidak ada yang bisa diputar" \
+                    "jalankan: $NC_APP check  untuk menemukan file yang rusak" \
+                    "attempts=$attempts" "dir=$NC_VIDEO_DIR"
                 exit "$NC_EXIT_ERROR"
             fi
             continue
@@ -377,10 +413,12 @@ nc_supervise_main() {
         dur=$(( ${EPOCHSECONDS} - t0 ))
 
         nc_supervisor_kill_children
+        local -a gone=()
         for (( idx = 0; idx < ${#socks[@]}; idx++ )); do
-            rm -f "${socks[idx]}" "$(nc_mpv_pid_file "$idx")" 2>/dev/null
+            gone+=("${socks[idx]}" "$(nc_mpv_pid_file "$idx")")
         done
-        rm -f "$NC_MEDIA_FILE" 2>/dev/null
+        gone+=("$NC_MEDIA_FILE")
+        rm -f "${gone[@]}" 2>/dev/null
 
         if [ "$rc" -eq 0 ]; then
             nc_log_info "mpv keluar normal, screensaver selesai"
@@ -395,10 +433,19 @@ nc_supervise_main() {
         previous="$file"
         if [ "$attempts" -gt "$NC_RETRY_LIMIT" ]; then
             nc_log_error "mpv gagal $attempts kali berturut-turut (rc=$rc), keluar"
+            nc_anomaly_emit "$NC_SEV_ERROR" "MPV_GAVE_UP" \
+                "mpv gagal $attempts kali berturut-turut (rc=$rc)" \
+                "jalankan: $NC_APP check  untuk melihat file mana yang rusak" \
+                "attempts=$attempts" "rc=$rc" "file=$(nc_anomaly_basename "$file")"
             exit "$NC_EXIT_ERROR"
         fi
         if [ "$(( dur * 1000 ))" -lt "$NC_STARTUP_GRACE_MS" ]; then
             nc_log_warn "mpv gagal setelah ${dur}ms (rc=$rc), coba file berikutnya"
+            nc_anomaly_emit "$NC_SEV_WARN" "MEDIA_RETRY" \
+                "mpv gagal setelah ${dur}ms (rc=$rc), pindah ke clip berikutnya" \
+                "kalau sering terjadi: $NC_APP check" \
+                "rc=$rc" "ms=$(( dur * 1000 ))" \
+                "file=$(nc_anomaly_basename "$file")"
         else
             nc_log_warn "mpv berhenti setelah ${dur}s (rc=$rc), coba file berikutnya"
         fi
@@ -407,10 +454,24 @@ nc_supervise_main() {
 
 nc_spawn_supervisor() {
     local self="$1"
-    (
-        trap - EXIT TERM INT HUP
-        exec "$self" __supervise
-    ) &
+    # Supervisor hidup berjam-jam. Kalau ia mewarisi stderr milik parent
+    # dan stderr itu PIPE, pipe tidak akan pernah mencapai EOF selama
+    # screensaver hidup - parent yang menunggu EOF akan menggantung.
+    #
+    # Aturannya: jangan pernah mewarisi pipe. Terminal (dipakai interaktif)
+    # dan socket journald milik systemd aman untuk dipegang, jadi keduanya
+    # tetap diwarisi supaya log masih terlihat.
+    if [ -p /dev/fd/2 ] || [ -p /dev/fd/1 ]; then
+        (
+            trap - EXIT TERM INT HUP
+            exec "$self" __supervise
+        ) >/dev/null 2>&1 &
+    else
+        (
+            trap - EXIT TERM INT HUP
+            exec "$self" __supervise
+        ) &
+    fi
     printf '%s' "$!"
     disown 2>/dev/null
     return 0

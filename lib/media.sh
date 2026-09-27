@@ -85,17 +85,77 @@ nc_media_read_order() {
     return 0
 }
 
+nc_media_min_duration() {
+    local v="${1:-}"
+    case "$v" in
+        '' | *[!0-9]*) printf '1' ;;
+        *) printf '%s' "$v" ;;
+    esac
+}
+
+# VALIDATE_MEDIA punya tiga tingkat:
+#   0  percaya semua, jangan sentuh file
+#   1  ada stream video dan durasi di atas ambang  (default)
+#   2  tingkat 1 plus decode nyata beberapa frame
+# Tingkat 2 menangkap file yang header-nya utuh tapi terpotong di tengah,
+# yang lolos ffprobe tapi gagal dimPV.
 nc_media_probe() {
-    local file="$1" out
-    [ "$NC_VALIDATE_MEDIA" -eq 1 ] || return 0
+    local file="$1"
+    local level="${NC_VALIDATE_MEDIA:-1}"
+    case "$level" in
+        '' | *[!0-9]*) level=1 ;;
+    esac
+    [ "$level" -ge 1 ] || return 0
     nc_have ffprobe || return 0
-    out="$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=codec_type \
-        -of csv=p=0 -- "$file" 2>/dev/null)"
-    case "$out" in
-        *video*) return 0 ;;
+
+    local meta
+    meta="$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=codec_type:format=duration \
+        -of default=nw=1:nk=1 -- "$file" 2>/dev/null)"
+
+    case "$meta" in
+        *video*) ;;
         *) return 1 ;;
     esac
+
+    local dur want
+    want="$(nc_media_min_duration "${NC_MIN_DURATION_SEC:-1}")"
+    dur="$(printf '%s\n' "$meta" | grep -m1 -E '^[0-9]+\.[0-9]+$' || true)"
+    if [ -n "$dur" ]; then
+        if [ "${dur%.*}" -eq 0 ] 2>/dev/null && [ "${dur#*.}" = "000000000" ]; then
+            return 1
+        fi
+        awk -v d="$dur" -v w="$want" 'BEGIN{exit !(d+0 >= w+0)}' 2>/dev/null || return 1
+    fi
+
+    if [ "$level" -ge 2 ]; then
+        nc_have ffmpeg || return 0
+        # -xerror membuat ffmpeg berhenti dan keluar non-zero di error
+        # pertama. Tanpa itu, file dengan NAL rusak tetap keluar 0 karena
+        # decode pelan-palan dianggap "warning" - padahal file itu akan
+        # tampil rusak atau freeze di layar.
+        #
+        # Dua sampel: 0.4 detik dari awal, lalu 0.3 detik dari ekor. Ekor
+        # penting karena file terpotong biasanya masih punya metadata utuh
+        # (terutama kalau moov-nya di depan) dan 0.4 detik pertama pun
+        # masih bisa didecode normal. Yang hilang justru bagian akhir.
+        if ! ffmpeg -v error -xerror -nostdin -i "$file" -t 0.4 -f null - \
+            </dev/null >/dev/null 2>&1; then
+            return 1
+        fi
+        if [ -n "$dur" ]; then
+            local seek
+            seek="$(awk -v d="$dur" \
+                'BEGIN{ s = d - 0.5; if (s < 0) s = 0; printf "%.3f", s }' 2>/dev/null)"
+            if [ -n "$seek" ] && [ "$seek" != "0.000" ]; then
+                if ! ffmpeg -v error -xerror -nostdin -ss "$seek" -i "$file" \
+                    -t 0.3 -f null - </dev/null >/dev/null 2>&1; then
+                    return 1
+                fi
+            fi
+        fi
+    fi
+    return 0
 }
 
 nc_media_build_order() {
@@ -104,6 +164,10 @@ nc_media_build_order() {
     if ! nc_media_glob "$NC_VIDEO_DIR"; then
         nc_log_error "tidak ada file video yang valid di: $NC_VIDEO_DIR"
         nc_log_error "format yang dicari: ${NC_EXT_ARR[*]}"
+        nc_anomaly_emit "$NC_SEV_ERROR" "MEDIA_EMPTY_DIR" \
+            "tidak ada file video yang valid di $NC_VIDEO_DIR" \
+            "isi folder video, atau jalankan: $NC_APP aerials --sync" \
+            "dir=$NC_VIDEO_DIR" "ext=${NC_EXT_ARR[*]}"
         return 1
     fi
 

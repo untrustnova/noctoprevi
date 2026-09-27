@@ -35,7 +35,7 @@ nc_log_level_name() {
 
 nc_log_init() {
     NC_LOG_LEVEL="${NC_LOG_LEVEL:-$NC_LOG_LEVEL_INFO}"
-    NC_LOG_TARGET="${NC_LOG_TARGET:-stderr}"
+    NC_LOG_TARGET="${NC_LOG_TARGET:-daemon}"
     NC_LOG_FILE="${NC_LOG_FILE:-}"
     NC_LOG_IDENT="${NC_LOG_IDENT:-$NC_APP}"
     local lvl
@@ -45,7 +45,7 @@ nc_log_init() {
         NC_LOG_LEVEL="$NC_LOG_LEVEL_INFO"
     fi
 
-    case "$(nc_lower "$NC_LOG_TARGET")" in
+    case "${NC_LOG_TARGET,,}" in
         auto)
             if [ -n "${JOURNAL_STREAM:-}" ] || [ -S /run/systemd/journal/socket ]; then
                 NC_LOG_TARGET="journal"
@@ -57,20 +57,59 @@ nc_log_init() {
         file) NC_LOG_TARGET="file" ;;
         both) NC_LOG_TARGET="both" ;;
         none | off | silent) NC_LOG_TARGET="none" ;;
+        daemon)
+            # Dipakai kalau dijalankan oleh idle daemon. Supervisor hidup
+            # berjam-jam, jadi ia tidak boleh memegang stdout/stderr parent:
+            # kalau parent membuka pipe dan menunggu EOF, parent itu
+            # menggantung selamanya. TTY interaktif tetap ke stderr.
+            if [ -t 2 ]; then
+                NC_LOG_TARGET="stderr"
+            elif [ -S /run/systemd/journal/socket ]; then
+                NC_LOG_TARGET="journal"
+            else
+                NC_LOG_TARGET="file"
+            fi
+            ;;
         stderr | *) NC_LOG_TARGET="stderr" ;;
     esac
 
-    if [ "$NC_LOG_TARGET" = "file" ] || [ "$NC_LOG_TARGET" = "both" ]; then
-        [ -n "$NC_LOG_FILE" ] || NC_LOG_FILE="$NC_LOG_FILE_DEFAULT"
-        NC_LOG_DIR="${NC_LOG_FILE%/*}"
-        if [ "$NC_LOG_DIR" = "$NC_LOG_FILE" ]; then
-            NC_LOG_DIR="."
-        fi
-        if [ ! -d "$NC_LOG_DIR" ] && ! mkdir -p "$NC_LOG_DIR" 2>/dev/null; then
-            NC_LOG_TARGET="stderr"
-            NC_LOG_FILE=""
-        fi
-    fi
+    case "$NC_LOG_TARGET" in
+        file | both)
+            [ -n "$NC_LOG_FILE" ] || NC_LOG_FILE="$NC_LOG_FILE_DEFAULT"
+            NC_LOG_DIR="${NC_LOG_FILE%/*}"
+            [ "$NC_LOG_DIR" = "$NC_LOG_FILE" ] && NC_LOG_DIR="."
+            if [ ! -d "$NC_LOG_DIR" ] && ! mkdir -p "$NC_LOG_DIR" 2>/dev/null; then
+                NC_LOG_TARGET="stderr"
+                NC_LOG_FILE=""
+            fi
+            ;;
+    esac
+}
+
+# Putar log yang sudah melewati LOG_MAX_LINES jadi <file>.1.
+# Satu generasi saja: screensaver menulis sedikit, jadi tidak perlu
+# membedakan log lama.
+nc_log_rotate_if_needed() {
+    local file="${NC_LOG_FILE:-}"
+    local max="${NC_LOG_MAX_LINES:-0}"
+    [ -n "$file" ] || return 0
+    [ -f "$file" ] || return 0
+    case "$max" in
+        '' | *[!0-9]*) return 0 ;;
+    esac
+    [ "$max" -gt 0 ] || return 0
+
+    local lines
+    lines="$(wc -l <"$file" 2>/dev/null)" || return 0
+    lines="${lines// /}"
+    case "$lines" in
+        '' | *[!0-9]*) return 0 ;;
+    esac
+    [ "$lines" -gt "$max" ] || return 0
+
+    mv -f "$file" "$file.1" 2>/dev/null || return 0
+    : >"$file" 2>/dev/null
+    return 0
 }
 
 nc_log_emit() {

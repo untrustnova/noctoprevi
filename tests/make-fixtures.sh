@@ -38,4 +38,25 @@ printf 'ignored' >"$DEST/notes.txt"
 mkdir -p "$DEST/subdir"
 cp "$DEST/alpha.mp4" "$DEST/subdir/nested.mp4" 2>/dev/null
 
+# Header utuh + durasi valid, tapi payload video di tengah dirusak.
+# File seperti ini LALOS ffprobe (VALIDATE_MEDIA=1) tapi gagal decode.
+# Hanya yang menangkapnya adalah VALIDATE_MEDIA=2.
+make_clip "corrupt.mp4" "yellow" 5 || exit 1
+python3 - "$DEST/corrupt.mp4" <<'PY' 2>/dev/null
+import sys
+path = sys.argv[1]
+with open(path, "r+b") as fh:
+    fh.seek(20000)
+    fh.write(b"\xff" * 20000)
+PY
+
+# Terpotong: header ada tapi badan tidak lengkap.
+head -c 20000 "$DEST/alpha.mp4" >"$DEST/truncated.mp4" 2>/dev/null
+
+# Terlalu pendek: 0.3 detik, di bawah MIN_DURATION_SEC.
+make_clip "tiny.mp4" "purple" 1 >/dev/null 2>&1
+ffmpeg -nostdin -loglevel error -y -i "$DEST/tiny.mp4" -t 0.3 -c copy \
+    "$DEST/tiny-short.mp4" 2>/dev/null
+rm -f "$DEST/tiny.mp4" 2>/dev/null
+
 ls -la "$DEST"

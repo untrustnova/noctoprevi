@@ -1,4 +1,4 @@
-.TH NOCTOPREVI 1 "2026" "noctoprevi 1.0.0" "User Commands"
+"1.1.0" "User Commands"
 .SH NAME
 noctoprevi \- modular Wayland video screensaver
 .SH SYNOPSIS
@@ -49,6 +49,50 @@ Cetak status. Keluar dengan kode 0 bila aktif, 1 bila tidak aktif.
 .B doctor
 Periksa dependensi, konfigurasi, socket runtime, dan dukungan akselerasi GPU.
 .TP
+.B check
+Preflight yang lebih dalam:
+.B doctor
+menjawab "dependensi ada?", sedangkan
+.B check
+menjawab "ini benar-benar akan jalan?". Decode nyata 20 frame, ambang latensi
+divalidasi terhadap hasil pengukuran, izin socket dan jumlah output aktif
+diperiksa. Kode keluar 2 kalau ada yang gagal.
+.TP
+.B anomalies
+Daftar anomali yang tercatat. Bebas dipipe dan tidak pernah membuka TUI.
+.TP
+.BI anomalies " [" \fP--sev\fP list " | " \fP--code\fP code " | " \fP--since\fP dur " | " \fP--limit\fP N " | " \fP--json\fP " | " \fP--counts\fP " | " \fP--health\fP " | " \fP--codes\fP " | " \fP--clear\fP "]"
+Tampilkan anomali terakhir. Formatnya NDJSON di
+.IR ~/.local/state/noctoprevi/anomalies.ndjson ,
+satu objek JSON per baris dengan
+.IR ts ", " sev ", " code ", " msg ", " hint ", dan " ctx .
+Field
+.I sev
+dan
+.I code
+memungkinkan penghitungan;
+.I hint
+berisi langkah konkret yang bisa dicoba.
+.TP
+.B tui
+Antarmuka terminal: banner, kartu status, menu bernomor, dan panel watch.
+Menghormati
+.B NO_COLOR
+dan mengembalikan kursor saat keluar.
+.TP
+.BI watch " [" \fP--interval\fP N]"
+Panel status yang memperbarui diri setiap
+.I N
+detik. Keduanya menolak jalan bila bukan terminal.
+.TP
+.BI selftest " [" \fP--duration\fP N]
+Buat pola uji (SMPTE bars plus penanda bergerak) untuk setiap output aktif,
+lalu jalankan screensaver di atasnya. Tujuannya membuktikan multi-monitor
+bukan menebaknya: setiap monitor harus menampilkan nomornya sendiri.
+Konfigurasi asli dicadukan lebih dulu dan dipulihkan keluar
+.BR selftest ,
+termasuk saat proses dihentikan.
+.TP
 .BI bench " \fR[\fP--runs\fP N\fR]\fP"
 Ulangi siklus start/stop sebanyak
 .I N
@@ -65,8 +109,11 @@ Blok ditandai agar tidak menimpa setelan lain dan aman dipasang ulang.
 .B uninstall
 Lepas blok integrasi, hentikan screensaver, dan bersihkan berkas runtime.
 .TP
-.BI aerials " [" list | \fP--sync\fP ] [\fP--quality\fP q] [\fP--only\fP label] [\fP--jobs\fP N]"
+.BI aerials " [" list | \fP--sync\fP ] [\fP--quality\fP q] [\fP--only\fP label] [\fP--jobs\fP N] [\fP--curl-arg\fP arg]"
 Kelola koleksi video Apple TV Aerial.
+.I AERIALS_TRUST=auto
+mengambil Apple Root CA sendiri karena root itu tidak ada di trust list
+Mozilla; trust store sistem tidak diubah.
 .TP
 .B version
 Cetak versi.
@@ -80,6 +127,24 @@ Kurangi keluaran.
 .TP
 .BR \-h ", " \-\-help ", " \-V ", " \-\-version
 Bantuan dan versi.
+.SH ANOMALIES
+Setiap kejadian tidak biasa dicatat sebagai satu baris NDJSON dengan
+.I code
+yang stabil. Kode, bobot severity, dan tingkat keparahan ada di
+.IR "noctoprevi anomalies --codes" .
+Bobot health score 24 jam terakhir:
+.I security
+40,
+.I error
+10,
+.I warn
+3,
+.I info
+0.
+.I info
+tidak dihitung karena
+.B STOP_ESCALATED
+terjadi di setiap stop dan tidak seharusnya menurunkan skor.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -119,8 +184,18 @@ yang menopang status singleton.
 .TP
 .I ~/.local/state/noctoprevi/
 Log bila
-.B LOG_TARGET=file
-.
+.B LOG_TARGET
+adalah
+.BR file ", " both ", atau " daemon
+tanpa journald. Berputar sendiri setelah
+.B LOG_MAX_LINES
+baris.
+.TP
+.I ~/.local/state/noctoprevi/apple-root.pem
+Salinan Apple Root CA, mode 0600, hanya untuk unduhan aerials. Diambil dari
+www.apple.com dan diverifikasi terhadap sidik jari yang di-pin di
+.IR lib/aerials.sh .
+Dihapus otomatis kalau tidak dipakai.
 .SH ENVIRONMENT
 .TP
 .B XDG_RUNTIME_DIR

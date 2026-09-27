@@ -5,7 +5,7 @@ SHAREDIR := $(PREFIX)/share/noctoprevi
 DOCDIR  := $(PREFIX)/share/doc/noctoprevi
 CFGDIR  := $(HOME)/.config/noctoprevi
 
-LIBS := core log config media ipc runtime cmd setup aerials
+LIBS := core log config anomaly anomaly_cmd tui media ipc runtime cmd setup aerials
 
 .PHONY: help install uninstall test test-gpu list-tests lint check \
         doctor bench clean dist
@@ -75,9 +75,18 @@ clean:
 	@rm -f /tmp/noctoprevi-$$(id -u).*
 	@echo "bersih"
 
+VERSION := $(shell sed -n 's/^NC_VERSION="\(.*\)"/\1/p' lib/core.sh | head -1)
+
+# PKGBUILD sengaja TIDAK ikut dalam tarball. Kalau ikut, mengubah
+# sha256sums di dalamnya mengubah tarball, yang mengubah sha256-nya lagi -
+# tidak pernah stabil. PKGBUILD dikirim ke AUR sebagai berkas terpisah.
 dist:
 	@mkdir -p dist
-	@tar czf dist/noctoprevi-1.0.0.tar.gz \
-		--transform 's,^,noctoprevi-1.0.0/,' \
-		bin lib config scripts packaging tests README.md LICENSE PRD.md
-	@echo "dist/noctoprevi-1.0.0.tar.gz"
+	@rm -f dist/noctoprevi-$(VERSION).tar.gz
+	@tar czf dist/noctoprevi-$(VERSION).tar.gz \
+		--transform 's,^,noctoprevi-$(VERSION)/,' \
+		bin lib config scripts tests Makefile README.md LICENSE PRD.md \
+		packaging/noctoprevi.1
+	@echo "dist/noctoprevi-$(VERSION).tar.gz"
+	@echo "sha256sum untuk PKGBUILD:"
+	@sha256sum dist/noctoprevi-$(VERSION).tar.gz | cut -d' ' -f1

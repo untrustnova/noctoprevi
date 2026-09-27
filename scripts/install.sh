@@ -113,7 +113,7 @@ fi
 step "memasang ke $PREFIX"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$SHARE_DIR" "$DOC_DIR" || die "gagal membuat $PREFIX"
 install -Dm755 "$ROOT/bin/noctoprevi" "$BIN_DIR/noctoprevi" || die "gagal memasang binari"
-for lib in core log config media ipc runtime cmd setup aerials; do
+for lib in core log config anomaly anomaly_cmd tui media ipc runtime cmd setup aerials; do
     install -Dm644 "$ROOT/lib/$lib.sh" "$LIB_DIR/$lib.sh" || die "gagal memasang lib/$lib.sh"
 done
 install -Dm644 "$ROOT/config/config.conf" "$SHARE_DIR/config.conf"

@@ -8,12 +8,21 @@ nc_cmd_start() {
 
     if nc_is_running; then
         nc_log_debug "sudah aktif, start diabaikan"
+        nc_anomaly_emit "$NC_SEV_INFO" "START_REFUSED" \
+            "start diabaikan: instance sudah hidup" \
+            "cukup satu screensaver pada satu waktu"
         return "$NC_EXIT_RUNNING"
     fi
     if ! nc_lock_probe_free; then
         nc_log_warn "instance lain masih berjalan (lock aktif)"
+        nc_anomaly_emit "$NC_SEV_INFO" "LOCK_BUSY" \
+            "start ditolak: lock dipegang proses lain" \
+            "proses lain sedang menjalankan screensaver" \
+            "lock=$NC_LOCKFILE"
         return "$NC_EXIT_RUNNING"
     fi
+
+    nc_log_rotate_if_needed
 
     nc_config_ext_array
     if [ ! -d "$NC_VIDEO_DIR" ]; then
@@ -47,7 +56,11 @@ nc_cmd_start() {
 
     if [ -z "$sup_pid" ] || ! nc_pid_alive "$sup_pid"; then
         nc_log_error "supervisor gagal start (tidak melaporkan pid hidup)"
-        eval "exec ${NC_LOCK_FD}>&-" 2>/dev/null
+        nc_anomaly_emit "$NC_SEV_ERROR" "SUPERVISOR_DIED" \
+            "supervisor berhenti tepat setelah start" \
+            "baca baris log terakhir, lalu: $NC_APP check" \
+            "video_dir=$NC_VIDEO_DIR"
+        nc_lock_release
         nc_remove_runtime_files
         return "$NC_EXIT_ERROR"
     fi
@@ -55,7 +68,11 @@ nc_cmd_start() {
     nc_msleep 30
     if ! nc_pid_alive "$sup_pid"; then
         nc_log_error "supervisor langsung mati setelah start, lihat pesan di atas"
-        eval "exec ${NC_LOCK_FD}>&-" 2>/dev/null
+        nc_anomaly_emit "$NC_SEV_ERROR" "SUPERVISOR_DIED" \
+            "supervisor langsung mati setelah start" \
+            "baca baris log terakhir, lalu: $NC_APP check" \
+            "video_dir=$NC_VIDEO_DIR"
+        nc_lock_release
         nc_remove_runtime_files
         return "$NC_EXIT_ERROR"
     fi
@@ -64,7 +81,15 @@ nc_cmd_start() {
         nc_log_warn "mpv belum siap menerima IPC, cek LOG_LEVEL=debug"
     fi
 
-    nc_log_info "screensaver aktif dalam $(nc_elapsed_ms "$t0")ms"
+    local start_ms
+    start_ms="$(nc_elapsed_ms "$t0")"
+    nc_log_info "screensaver aktif dalam ${start_ms}ms"
+    if [ "$start_ms" -gt "${NC_START_WARN_MS:-1500}" ]; then
+        nc_anomaly_emit "$NC_SEV_WARN" "START_SLOW" \
+            "start butuh ${start_ms}ms" \
+            "VALIDATE_MEDIA=2 atau folder video yang lambat bisa jadi penyebabnya" \
+            "ms=$start_ms"
+    fi
     return "$NC_EXIT_OK"
 }
 
@@ -118,6 +143,10 @@ nc_cmd_stop() {
 
         if ! nc_stop_pids_gone "${live[@]}"; then
             nc_log_debug "IPC quit belum selesai dalam ${NC_STOP_IPC_WAIT_MS}ms, eskalasi ke SIGTERM"
+            nc_anomaly_emit "$NC_SEV_INFO" "STOP_ESCALATED" \
+                "IPC quit belum selesai dalam ${NC_STOP_IPC_WAIT_MS}ms, naik ke SIGTERM" \
+                "ukur dulu: $NC_APP bench --escalation-sweep" \
+                "wait_ms=$NC_STOP_IPC_WAIT_MS"
             for i in "${live[@]}"; do
                 kill -TERM "$i" 2>/dev/null
             done
@@ -143,20 +172,36 @@ nc_cmd_stop() {
         t_visible="$(nc_now_us)"
     fi
 
+    # Bersihkan berkas kita lebih dulu, jangan menunggu supervisor. Waktu
+    # mpv sudah mati, layarnya sudah bersih, jadi sisa pekerjaan di sini
+    # tidak dirasakan pengguna. Tidak perlu diserialikan di belakang
+    # teardown supervisor yang juga sedang membersihkan dirinya sendiri.
+    nc_remove_runtime_files
+    rm -f "$NC_ORDER_FILE" 2>/dev/null
+
     if [ -n "$sup" ]; then
         waited=0
         while [ "$waited" -lt 60 ] && nc_pid_alive "$sup"; do
-            nc_msleep 5
-            waited=$(( waited + 5 ))
+            nc_msleep 2
+            waited=$(( waited + 2 ))
         done
         nc_pid_alive "$sup" && kill -KILL "$sup" 2>/dev/null
     fi
 
-    nc_remove_runtime_files
-    rm -f "$NC_ORDER_FILE" 2>/dev/null
+    nc_lock_release
 
     t_total="$(nc_now_us)"
-    nc_log_debug "stop: layar bersih dalam $(nc_us_to_ms "$(( t_visible - t0 ))")ms, total $(nc_us_to_ms "$(( t_total - t0 ))")ms"
+    local visible_ms total_ms
+    visible_ms="$(nc_us_to_ms "$(( t_visible - t0 ))")"
+    total_ms="$(nc_us_to_ms "$(( t_total - t0 ))")"
+    nc_log_debug "stop: layar bersih dalam ${visible_ms}ms, total ${total_ms}ms"
+    if [ "$total_ms" -gt "$NC_STOP_WARN_MS" ]; then
+        nc_anomaly_emit "$NC_SEV_WARN" "STOP_SLOW" \
+            "stop butuh ${total_ms}ms" \
+            "bandingkan dengan anggaran, atau cek apakah compositor sedang sibuk" \
+            "visible_ms=$visible_ms" "total_ms=$total_ms" \
+            "budget_ms=$NC_STOP_WARN_MS"
+    fi
     return "$NC_EXIT_OK"
 }
 

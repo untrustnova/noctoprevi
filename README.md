@@ -24,10 +24,140 @@ Dirancang untuk CachyOS + Noctalia Shell, jalan juga di Hyprland, Sway, dan Niri
 
 ---
 
+## 1.1.0
+
+### Antarmuka terminal dan lapisan anomali
+
+- **`noctoprevi` tanpa argumen membuka TUI** kalau dijalankan di terminal, sama
+  seperti nocatoo. Kalau bukan terminal, tampilkan bantuan — `clear` di
+  non-TTY itu merusak keluaran yang sedang di-pipe.
+- **Lapisan anomali terstruktur.** Log biasa dibaca berurutan dan isinya yang
+  enak dibaca. Anomali dicatat sebagai NDJSON di
+  `~/.local/state/noctoprevi/anomalies.ndjson`: satu objek per baris dengan
+  kode stabil, severity, dan **hint berisi langkah konkret**. 17 kodenya bisa
+  dilihat dengan `noctoprevi anomalies --codes`.
+
+  Kenapa dua lapis: teks bebas tidak bisa dihitung. Pertanyaan seperti
+  "berapa kali stop butuh eskalasi dalam 24 jam terakhir" mustahil dijawab
+  dari prosa, tapi satu baris NDJSON dengan `code` yang sama bisa langsung
+  dijumlahkan.
+- **Setiap kode anomali membawa hint.** Bukan cuma "terjadi apa", tapi
+  "coba apa":
+
+  ```
+  WARN  STOP_ESCALATED
+    IPC quit belum selesai dalam 20ms, naik ke SIGTERM
+    -> ukur dulu: noctoprevi bench --escalation-sweep
+  ```
+
+- **`noctoprevi check`** — preflight. `doctor` menjawab "dependensi ada?";
+  `check` menjawab "ini benar-benar akan jalan?" — decode nyata 20 frame,
+  validasi ambang idle, cek izin socket, cek jumlah output aktif.
+- **`noctoprevi selftest`** — pola uji (SMPTE bars + penanda bergerak) per
+  output, supaya multi-monitor bisa dibuktikan bukan ditebak. Ini untuk
+  Phase 2 nanti, saat `MONITOR_MODE=all` diuji dengan dua monitor.
+- **`noctoprevi watch`** — panel status yang memperbarui diri tiap 2 detik.
+- TUI dan `watch` menolak jalan kalau bukan terminal, mengembalikan kursor
+  saat keluar, dan menghormati `NO_COLOR`. Tiga hal yang belum ada di
+  nocatoo tapi penting untuk tool yang sering dipanggil daemon.
+- Notifikasi desktop untuk anomali `error`/`security`, dibatasi satu per
+  jendela waktu (`ANOMALY_NOTIFY`, default mati).
+
+### 1.0.1
+
+Perubahan dari 1.0.0, semuanya bug fix dan penyempurnaan kecil:
+
+- **`aerials` sekarang jalan di distro mana pun.** 1.0.0 gagal total karena
+  Apple Root CA tidak ada di trust list Mozilla. 1.0.1 mengambil root itu dari
+  apple.com, memverifikasi sidik jarinya, dan memakainya hanya untuk aerials.
+  Tanpa perlu mengubah trust store sistem, tanpa `--insecure`.
+- **Idle default 300/900 detik menjadi 600/1200.** 300 detik terlalu sering
+  menyela. Sekarang `doctor` menampilkan nilai yang sedang aktif, dan ada test
+  yang menjaga agar angka di `lib/config.sh`, `config.conf`, dan kedua contoh
+  idle daemon tidak berbeda.
+- **`LOG_TARGET` default jadi `daemon`.** Supervisor yang hidup berjam-jam
+  tidak lagi memegang stdout/stderr milik idle daemon. Dijalankan manual di
+  terminal tetap ke stderr; dijalankan daemon, ke journald atau file.
+  Supervisor juga tidak pernah mewarisi stdout/stderr berupa **pipe**, apa pun
+  `LOG_TARGET`-nya — kalau ia memegangnya, parent yang membaca pipe akan
+  menunggu EOF selamanya.
+- **Rotasi log.** `LOG_MAX_LINES` dulu hanya dibaca tapi tidak pernah dipakai.
+  Sekarang log berputar sendiri, satu generasi, dicek sekali per `start`.
+- **`VALIDATE_MEDIA` jadi bertingkat (0/1/2).** Tingkat 2 menangkap file
+  yang header dan durasinya utuh tapi payload video-nya rusak atau terpotong —
+  yang lolos ffprobe tapi akan tampil freeze di layar.
+- **`VIDEO_FPS_LIMIT`.** Ditambahkan, dengan catatan jujur di README bahwa ini
+  mengurangi beban presentasi, bukan decode.
+- Peringatan config yang terbit sebelum log siap sekarang di-buffer, lalu
+  dicetak ke `LOG_TARGET` yang benar.
+- **Bug pada `bench` dan `stop` dalam satu proses.** `fd` lock tidak pernah
+  dilepas setelah `stop`, jadi `start` berikutnya di proses yang sama
+  mengira instance lain masih hidup lalu tidak melakukan apa-apa. Akibatnya
+  `bench` melaporkan angka yang tidak berarti setelah siklus pertama. Test
+  regresinya ada.
+- PKGBUILD: `sha256sums` terisi, versi dibaca dari `lib/core.sh`, build
+  berhenti kalau keduanya tidak cocok, dan PKGBUILD tidak ikut dipaketkan ke
+  dalam tarball (kalau ikut, checksum-nya tidak akan pernah stabil).
+- `bench --escalation-sweep` untuk mengukur `STOP_IPC_WAIT_MS` di mesin kamu.
+
+---
+
+## Anomali
+
+Setiap kejadian tidak biasa dicatat sebagai NDJSON di
+`~/.local/state/noctoprevi/anomalies.ndjson` — satu objek JSON per baris:
+
+```json
+{"ts":1758938400.21,"sev":"warn","code":"STOP_ESCALATED",
+ "msg":"IPC quit belum selesai dalam 20ms, naik ke SIGTERM",
+ "hint":"ukur dulu: noctoprevi bench --escalation-sweep",
+ "ctx":{"wait_ms":"20"}}
+```
+
+Field `sev` dan `code` itu yang membuatnya bisa dihitung; `hint` yang
+membuatnya bisa ditindaklanjuti.
+
+```bash
+noctoprevi anomalies                      # 20 terakhir
+noctoprevi anomalies --counts             # berapa kali per kode
+noctoprevi anomalies --sev error,security # hanya yang serius
+noctoprevi anomalies --since 7d           # seminggu terakhir
+noctoprevi anomalies --health             # 0-100
+noctoprevi anomalies --codes              # daftar kode + artinya
+noctoprevi anomalies --json | jq .        # untuk dipipe ke alat lain
+```
+
+Health score diturunkan dari jumlah anomali 24 jam terakhir dengan bobot
+berbeda per severity: `security` 40, `error` 10, `warn` 3, `info` 0.
+`info` tidak dihitung supaya `STOP_ESCALATED` yang terjadi di setiap stop
+tidak menarik skor ke bawah tanpa alasan.
+
+---
+
+## Terminal interface
+
+```
+noctoprevi            # buka TUI
+noctoprevi tui        # sama
+noctoprevi watch      # panel live, refresh tiap 2 detik
+```
+
+Menu TUI: start/stop, next, previous, library, bench, doctor, check,
+watch, anomalies, edit config, aerials, install idle daemon.
+
+Bahasa TUI English; pesan diagnostik di dalam program tetap Bahasa
+Indonesia supaya konsisten dengan log. Kalau nanti tooling-nya digabung,
+pemisahan ini eases: menu tinggal dipetakan ke kunci i18n yang sama
+tanpa perlu mengubah teks log yang sudah ada.
+
+---
+
 ## Daftar isi
 
 - [Cepat mulai](#cepat-mulai)
 - [Perintah](#perintah)
+- [Anomali](#anomali)
+- [Terminal interface](#terminal-interface)
 - [Konfigurasi](#konfigurasi)
 - [Integrasi idle](#integrasi-idle)
 - [Koleksi video](#koleksi-video)
@@ -131,14 +261,27 @@ FULLSCREEN=1
 MONITOR_MODE=focused           # focused | all
 
 # Robustness
-VALIDATE_MEDIA=1               # cek dengan ffprobe sebelum diputar
+VALIDATE_MEDIA=1               # 0=tanpa cek  1=stream video + durasi  2=+ decode nyata
+MIN_DURATION_SEC=1             # ambang durasi untuk VALIDATE_MEDIA>=1
 RETRY_LIMIT=3                  # coba file lain sebanyak ini kalau mpv gagal
 STARTUP_GRACE_MS=2500          # mpv mati sebelum ini = dianggap file rusak
 STOP_IPC_WAIT_MS=20            # tunggu IPC quit, lalu eskalasi ke SIGTERM
 
 # Log
 LOG_LEVEL=info                 # debug | info | warn | error | off
-LOG_TARGET=stderr              # stderr | file | both | journal
+LOG_TARGET=daemon              # daemon | stderr | file | both | journal | auto | none
+LOG_MAX_LINES=2000             # putar log kalau lewat ini baris (0=matikan)
+
+# Baterai
+VIDEO_FPS_LIMIT=0              # 0=mati, atau 15/24/25/30/50/60
+
+# Aerials
+AERIALS_TRUST=auto             # auto | system | apple
+
+# Anomali
+ANOMALY_MAX_LINES=5000         # putar NDJSON anomali kalau lewat ini baris
+ANOMALY_NOTIFY=0               # 1 = beri tahu desktop saat ada error/security
+ANOMALY_NOTIFY_THROTTLE_S=300  # jeda minimal antar notifikasi
 ```
 
 Semua key ada di `config/config.conf` yang terpasang, lengkap dengan
@@ -149,7 +292,7 @@ noctoprevi stop && noctoprevi start
 ```
 
 `MPV_ARGS` mengganti set argumen inti, `EXTRA_MPV_ARGS` hanya menambahkan.
- Pakai `EXTRA_MPV_ARGS` dulu; pindah ke `MPV_ARGS` baru kalau benar-benar
+Pakai `EXTRA_MPV_ARGS` dulu; pindah ke `MPV_ARGS` baru kalau benar-benar
 perlu meng-override default.
 
 ---
@@ -225,6 +368,14 @@ Ukuran perkiraan: `1080p` sekitar 1–3 GB untuk semua clip. `4k` bisa sampai
 Butuh `curl` dan `jq`. `ffmpeg` tidak dipakai untuk unduhan (file Apple sudah
 dalam `.mov` jadi), tapi tetap berguna kalau kamu mau transcode sendiri.
 
+### Peran trust store
+
+`noctoprevi` tidak mengubah trust store sistem, tapi ia juga tidak butuh
+kamu mengubahnya. Apple Root CA tidak ada di trust list Mozilla, jadi tanpa
+penanganan khusus `aerials` akan gagal total di semua distro Linux.
+`AERIALS_TRUST=auto` mengambil root itu sendiri dari `www.apple.com` dan
+memverifikasi sidik jarinya, lalu memakainya hanya untuk unduhan aerials.
+
 Kalau lewat proxy atau memakai trust store sendiri:
 
 ```conf
@@ -233,6 +384,9 @@ AERIALS_CURL_ARGS=--cacert /path/ke/bundle.pem
 ```
 
 Atau sesaat via CLI: `noctoprevi aerials --sync --curl-arg=--cacert=/path/bundle.pem`
+
+Kalau `--cacert` kamu tentukan sendiri, program tidak menimpanya dengan root
+Apple.
 
 ---
 
@@ -304,7 +458,8 @@ t+   bersihkan socket / pidfile / order / media
 Yang diukur sebagai "layar bersih" adalah mpv mati, bukan socat selesai.
 Fork `socat` berjalan paralel dengan polling, jadi tidak menumpuk waktu.
 
-**Kenapa ada eskalasi ke SIGTERM.** Diuji langsung di mesin ini:
+**Kenapa ada eskalasi ke SIGTERM.** Diuji di mesin ini dengan clip 1080p
+Apple Aerial asli (bukan clip uji kecil):
 
 | Cara stop | Waktu |
 | --- | --- |
@@ -314,9 +469,33 @@ Fork `socat` berjalan paralel dengan polling, jadi tidak menumpuk waktu.
 
 mpv menutup `quit` dengan rapi tapi butuh ~40 ms karena menunggu graceful
 shutdown penuh. `SIGTERM` memakai jalur keluar yang lebih cepat dan tetap
-teratur — tidak merusak apa pun karena screensaver hanya membaca file.
+teratur, tidak merusak apa pun karena screensaver hanya membaca file.
 Jadi program mencoba cara bersih dulu, lalu naik ke `SIGTERM` supaya tidak
-menunggu. Hasilnya layar bersih dalam 13-22 ms, bukan 28 ms.
+menunggu.
+
+### Mengukur sendiri
+
+Nilai default `STOP_IPC_WAIT_MS=20` dipilih dari pengukuran di satu mesin.
+Machine lain bisa berbeda jauh, jadi kalau angkanya terasa lambat,
+ukur dulu:
+
+```bash
+noctoprevi bench --escalation-sweep --runs 5
+```
+
+Yang diukur adalah waktu total perintah `stop` dari luar, untuk beberapa nilai
+`STOP_IPC_WAIT_MS`. Contoh hasil di mesin ini dengan clip 1080p:
+
+| `STOP_IPC_WAIT_MS` | p50 | p95 |
+| --- | --- | --- |
+| 0 (langsung SIGTERM) | 40 ms | 46 ms |
+| 20 (default) | 55 ms | 72 ms |
+| 100 | 75 ms | 83 ms |
+
+Jadi menunggu lebih lama tidak pernah membantu di sini: jalur graceful
+hampir selalu kalah dari `SIGTERM`. Kalau kamu tidak keberatan dengan shut
+down yang tidak sepenuhnya bersih, `STOP_IPC_WAIT_MS=0` ada sekitar 15 ms
+lebih cepat.
 
 Semua penundaan polling memakai `read -t` pada fifo, bukan `sleep`, karena
 `sleep` adalah binary eksternal dan akan menambah ~1 ms per iterasi.
@@ -376,6 +555,34 @@ jalankan `focused` per workspace, atau konfigurasi `--force-window` manual
 per output lewat `EXTRA_MPV_ARGS`.
 
 ---
+
+## Baterai
+
+Terukur di mesin ini dengan clip Aerial 1080p asli:
+
+- clip uji sintetis 320x180 → **0,75%** dari satu core
+- clip Aerial 1080p asli → **7%** dari satu core
+
+Jadi angka kecil di atas berasal dari clip uji yang remeh, bukan dari
+programnya yang hemat. Untuk 1080p, vaapi masih jauh lebih murah
+daripada decode software, tapi jangan berharap angka 0,75%.
+
+Kalau kamu mau lebih hemat, urutannya:
+
+| Yang diubah | Seberapa besar dampaknya |
+| --- | --- |
+| `AERIALS_QUALITY=1080p` (bukan `4k`) | besar. Decode 4K jauh lebih mahal, dan monitor 100 Hz membuat animasi jelas lebih mahal |
+| Pakai clip 30fps, bukan 60fps | besar |
+| `IDLE_START_SEC` lebih besar (misal 1200) | besar. Screensaver lebih jarang menyala |
+| `VIDEO_FPS_LIMIT=30` | kecil. Hanya mengurangi beban presentasi, **bukan** decode |
+
+`VIDEO_FPS_LIMIT` perlu dijelaskan supaya tidak salah harapan. Opsi itu
+mengirim `--video-sync=display-vdrop --untimed` ke mpv. Yang terjadi: mpv
+tetap men-decode setiap frame lewat VA-API, hanya presentasinya yang
+dipercepat. Jadi jangan berharap banyak penghematan baterai dari situ.
+
+Kalau memang sedang kecepetan dan tidak butuh screensaver, hal paling
+efektif adalah `IDLE_START_SEC` yang lebih besar, bukan `VIDEO_FPS_LIMIT`.
 
 ## Mengukur latensi
 
@@ -438,24 +645,39 @@ Lihat baris `stop: layar bersih dalam Xms`.
 Coba `HWDEC=vaapi` atau `HWDEC=nvdec` secara eksplisit, atau `HWDEC=no`
 untuk memastikan masalahnya bukan decoding.
 
-**`aerials` gagal dengan "kesalahan sertifikat TLS"**
+**`aerials` gagal dengan TLS error**
 
-Trust store sistem tidak punya root CA Apple. Gejalanya `curl: (60)`. Cek
-dulu:
+Apple Root CA **tidak ada** di trust list Mozilla mana pun, termasuk bundle
+resmi curl.se (121 sertifikat, tanpa Apple). Jadi `sylvan.apple.com` gagal
+di hampir semua distro Linux, dan `sudo pacman -S ca-certificates-mozilla`
+tidak akan menyelesaikannya.
+
+`noctoprevi` sudah menangani ini sendiri. `AERIALS_TRUST=auto` (default)
+mencoba trust store sistem dulu; kalau gagal karena sertifikat, ia
+mengambil Apple Root CA dari `www.apple.com` — host-nya pakai TLS publik,
+jadi langkah bootstrap-nya sendiri terverifikasi — lalu **memeriksa sidik
+jarinya** terhadap nilai yang di-pin di `lib/aerials.sh`, dan memakainya
+hanya untuk unduhan aerials. Trust store sistem tidak diubah, dan tidak
+perlu `--insecure`.
+
+Kalau tetap gagal, lihat lognya:
 
 ```bash
-printf '%s\n' | sudo trust list --filter=ca-anchors | grep -i apple
+LOG_TARGET=stderr noctoprevi aerials --sync --only Greenland
 ```
 
-Kalau kosong, pasang ulang anchors-nya:
+Opsi terkait:
+
+```conf
+AERIALS_TRUST=system   # jangan pernah mengambil root apa pun
+AERIALS_TRUST=apple    # selalu ambil root Apple lebih dulu
+```
+
+Kalau kamu memang sudah punya bundle sendiri:
 
 ```bash
-sudo pacman -S --overwrite '*' ca-certificates-mozilla
-sudo update-ca-trust
+noctoprevi aerials --sync --curl-arg=--cacert=/path/ke/bundle.pem
 ```
-
-Kalau tidak boleh pakai sudo, arahkan ke bundle sendiri lewat
-`AERIALS_CURL_ARGS=--cacert=/path/ke/bundle.pem`.
 
 **Butuh jalan di dua monitor**
 
@@ -474,16 +696,19 @@ lib/media.sh            glob, Fisher-Yates, playlist, advance
 lib/ipc.sh              JSON-IPC mpv lewat socat
 lib/runtime.sh          singleton, supervisor, hope stop path
 lib/cmd.sh              start/stop/toggle/next/prev/status
-lib/setup.sh            doctor, bench, install/uninstall idle daemon
+lib/setup.sh            doctor, check, bench, selftest, idle daemon
 lib/aerials.sh          unduh koleksi Aerial
+lib/anomaly.sh          NDJSON anomali: tulis, baca, rotasi, health score
+lib/anomaly_cmd.sh      perintah `anomalies`
+lib/tui.sh              TUI, kartu status, panel live `watch`
 config/                 template config.conf + contoh hypridle/swayidle
 scripts/install.sh      installer tanpa root
 packaging/PKGBUILD      paket Arch/CachyOS
 tests/                  test suite tanpa dependensi
 ```
 
-Tidak ada dependensi runtime selain `mpv`, `socat`, `flock`. Tidak ada
-dependensi Python. Sekitar 2400 baris bash untuk programnya, sisanya test.
+Tidak ada dependensi runtime selain `mpv`, `socat`, `flock`, dan `jq` opsional
+(ada fallback tanpa jq). Tidak ada dependensi Python.
 
 ---
 

@@ -1,1 +1,5 @@
+dist/
+*.log
+*.part
 prd.md
+docs/nocatoo-display-audit.md

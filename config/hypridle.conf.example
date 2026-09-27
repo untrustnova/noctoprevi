@@ -13,9 +13,9 @@
 #      dan tidak menimpa setting lain yang sudah kamu punya.
 #
 # Yang terjadi:
-#   300 detik tanpa input   ->  screensaver video menyala fullscreen
+#   600 detik tanpa input   ->  screensaver video menyala fullscreen
 #   ada input mouse/keyboard ->  screensaver mati, layar langsung normal
-#   900 detik tanpa input   ->  lockscreen Noctalia terkunci
+#   1200 detik tanpa input  ->  lockscreen Noctalia terkunci
 #
 # Kenapa screensaver dimatikan lewat on-resume, bukan on-timeout:
 #   Agar layar tidak berkedip. Satu listener dengan timeout=0 tidak
@@ -33,12 +33,12 @@
 # Di-generate ulang dengan: noctoprevi install --idle-daemon hypridle
 
 listener {
-    timeout = 300
+    timeout = 600
     on-timeout = noctoprevi start
 }
 
 listener {
-    timeout = 900
+    timeout = 1200
     on-timeout = noctalia msg lock
 }
 

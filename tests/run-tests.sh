@@ -15,6 +15,10 @@ set -uo pipefail
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NOCTOPREVI="$ROOT/bin/noctoprevi"
 VERSION="$(sed -n 's/^NC_VERSION="\(.*\)"/\1/p' "$ROOT/lib/core.sh" | head -1)"
+VSTR="noctoprevi $VERSION"
+# Daftar modul diambil dari Makefile, bukan ditulis ulang di sini. Kalau ada
+# modul baru yang ditambah ke LIBS, test ikutancier tanpa perlu diedit.
+NC_LIBS="$(sed -n 's/^LIBS *:*= *//p' "$ROOT/Makefile" | head -1)"
 
 REAL_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
@@ -149,12 +153,9 @@ mpv_count() {
 # Body dibaca sebagai teks skrip; variabel di-setup lewat argumen pertama.
 nc_unit() {
     local setup="$1" body="$2"
-    NCU_SETUP="$setup" NCU_BODY="$body" NCU_ROOT="$ROOT" bash -c '
+    NCU_SETUP="$setup" NCU_BODY="$body" NCU_ROOT="$ROOT" NCU_LIBS="$NC_LIBS" bash -c '
         set -uo pipefail
-        . "$NCU_ROOT/lib/core.sh"
-        . "$NCU_ROOT/lib/log.sh"
-        . "$NCU_ROOT/lib/config.sh"
-        . "$NCU_ROOT/lib/media.sh"
+        for _m in $NCU_LIBS; do . "$NCU_ROOT/lib/$_m.sh"; done
         nc_init_paths
         nc_config_defaults
         NC_LOG_TARGET=none
@@ -170,7 +171,7 @@ nc_unit() {
 
 t_version() {
     t_begin "version"
-    assert_contains "versi tercetak" "$(run version)" "noctoprevi"
+    assert_contains "versi tercetak" "$(run version)" "$VSTR"
     t_end
 }
 
@@ -226,6 +227,9 @@ t_toggle_when_idle() {
 
 t_start_empty_dir() {
     t_begin "start dengan direktori kosong"
+    # default LOG_TARGET=daemon mengirim ke journald kalau stderr bukan TTY,
+    # jadi test yang memeriksa pesan wajib meminta stderr secara eksplisit
+    nc_write_config 'LOG_TARGET=stderr'
     local out rc
     out="$(run start)"
     rc="$?"
@@ -243,6 +247,7 @@ t_start_empty_dir() {
 
 t_start_wrong_extension_only() {
     t_begin "start dengan format tak didukung"
+    nc_write_config 'LOG_TARGET=stderr'
     printf 'x' >"$VIDEOS/only.avi"
     printf 'x' >"$VIDEOS/only.txt"
     local out rc
@@ -779,7 +784,7 @@ t_signal_kills_children() {
 t_start_reports_supervisor_failure() {
     t_begin "start melaporkan kegagalan supervisor"
     make_clip "$VIDEOS/a.mp4" || { t_skip "butuh ffmpeg"; t_end; return; }
-    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0'
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' 'LOG_TARGET=stderr'
     local out rc
     out="$(NOCTOPREVI_MPV="$SANDBOX/tidak-ada-mpv" run start)"
     rc="$?"
@@ -929,14 +934,14 @@ t_installed_layout() {
     mkdir -p "$prefix/bin" "$prefix/lib/noctoprevi" "$prefix/share/noctoprevi"
     install -m 755 "$ROOT/bin/noctoprevi" "$prefix/bin/noctoprevi"
     local l
-    for l in core log config media ipc runtime cmd setup aerials; do
+    for l in $NC_LIBS; do
         install -m 644 "$ROOT/lib/$l.sh" "$prefix/lib/noctoprevi/$l.sh"
     done
     install -m 644 "$ROOT/config/config.conf" "$prefix/share/noctoprevi/config.conf"
 
     local out rc
     out="$("$prefix/bin/noctoprevi" version 2>&1)"
-    assert_contains "binary Prefix menemukan lib-nya" "$out" "noctoprevi 1.0.0"
+    assert_contains "binary Prefix menemukan lib-nya" "$out" "$VSTR"
     out="$("$prefix/bin/noctoprevi" doctor 2>&1)"
     assert_not_contains "tidak ada pesan modul hilang" "$out" "modul tidak ditemukan"
 
@@ -963,7 +968,7 @@ t_symlink_invocation() {
     ln -sf "$ROOT/bin/noctoprevi" "$link"
     local out
     out="$("$link" version 2>&1)"
-    assert_contains "symlink tetap menemukan lib" "$out" "noctoprevi 1.0.0"
+    assert_contains "symlink tetap menemukan lib" "$out" "$VSTR"
     t_end
 }
 
@@ -978,6 +983,834 @@ t_no_lib_error_message() {
     assert_eq "exit 2" "$rc" "2"
     assert_contains "menyebut lokasi yang dicari" "$out" "modul tidak ditemukan"
     assert_contains "memberi saran perbaikan" "$out" "pasang ulang"
+    t_end
+}
+
+t_aerials_root_fingerprint_logic() {
+    t_begin "verifikasi sidik jari root CA (offline)"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/aerials.sh"
+        nc_init_paths
+
+        # sidik jari yang di-pin harus 64 hex
+        if [[ "${NC_APPLE_ROOT_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+            printf "pin-format:ok\n"
+        else
+            printf "pin-format:BAD(%s)\n" "$NC_APPLE_ROOT_SHA256"
+        fi
+
+        # DER acak -> PEM -> decode balik harus mengembalikan hash yang sama
+        head -c 256 /dev/urandom > "$XDG_RUNTIME_DIR/fake.der"
+        sha256sum "$XDG_RUNTIME_DIR/fake.der" | cut -d" " -f1 | tr a-f A-F > "$XDG_RUNTIME_DIR/want"
+        if nc_der_to_pem "$XDG_RUNTIME_DIR/fake.der" "$XDG_RUNTIME_DIR/fake.pem"; then
+            nc_pem_der_sha256 "$XDG_RUNTIME_DIR/fake.pem" > "$XDG_RUNTIME_DIR/got"
+            if [ "$(cat "$XDG_RUNTIME_DIR/got")" = "$(cat "$XDG_RUNTIME_DIR/want")" ]; then
+                printf "roundtrip:ok\n"
+            else
+                printf "roundtrip:BAD(want=%s got=%s)\n" \
+                    "$(cat "$XDG_RUNTIME_DIR/want")" "$(cat "$XDG_RUNTIME_DIR/got")"
+            fi
+        else
+            printf "roundtrip:BAD(der_to_pem gagal)\n"
+        fi
+
+        # PEM rusak harus ditolak, bukan diterima diam-diam
+        printf "BUKAN SERTIFIKAT\n" > "$XDG_RUNTIME_DIR/junk.pem"
+        if nc_pem_der_sha256 "$XDG_RUNTIME_DIR/junk.pem" >/dev/null 2>&1; then
+            printf "junk:TERIMA\n"
+        else
+            printf "junk:ditolak\n"
+        fi
+
+        # klasifikasi pesan TLS
+        for m in "curl: (60) SSL certificate problem: unable to get local issuer certificate" \
+                 "curl: (77) CA cert problem, unable to get local issuer certificate" \
+                 "curl: (51) self signed certificate in certificate chain"; do
+            if nc_is_tls_error "$m"; then printf "tls:ok\n"; else printf "tls:BAD(%s)\n" "$m"; fi
+        done
+        for m in "curl: (7) Failed to connect" "HTTP 403 forbidden" ""; do
+            if nc_is_tls_error "$m"; then printf "tlsfalse:BAD(%s)\n" "$m"; else printf "tlsfalse:ok\n"; fi
+        done
+    ')"
+    assert_contains "pin fingerprint 64 hex" "$res" "pin-format:ok"
+    assert_contains "DER->PEM->DER bulat" "$res" "roundtrip:ok"
+    assert_contains "PEM rusak ditolak" "$res" "junk:ditolak"
+    local tls_ok
+    tls_ok="$(printf '%s' "$res" | grep -c '^tls:ok$')"
+    assert_eq "3 pesan TLS dikenali" "$tls_ok" "3"
+    local tls_false
+    tls_false="$(printf '%s' "$res" | grep -c '^tlsfalse:ok$')"
+    assert_eq "3 pesan non-TLS ditolak" "$tls_false" "3"
+    t_end
+}
+
+t_aerials_trust_config() {
+    t_begin "AERIALS_TRUST divalidasi"
+    nc_write_config 'AERIALS_TRUST=entah'
+    assert_contains "nilai ngawur jatuh ke auto" "$(run doctor)" "auto"
+
+    nc_write_config 'AERIALS_TRUST=SYSTEM'
+    assert_contains "huruf besar dinormalkan ke lowercase" "$(run doctor)" "AERIALS_TRUST    system"
+    t_end
+}
+
+t_aerials_trust_system_no_bootstrap() {
+    t_begin "AERIALS_TRUST=system tidak pernah bootstrap root"
+    local state="$XDG_STATE_HOME/noctoprevi"
+    mkdir -p "$state" 2>/dev/null
+    rm -f "$state/apple-root.pem" 2>/dev/null
+    nc_write_config 'AERIALS_TRUST=system' "VIDEO_DIR=$VIDEOS"
+    timeout 60 "$NOCTOPREVI" aerials list >/dev/null 2>&1
+    assert_no_file "root CA tidak dibuat" "$state/apple-root.pem"
+    t_end
+}
+
+t_aerials_tampered_fingerprint_rejected() {
+    t_begin "sidik jari dibohongi -> root ditolak"
+    command -v curl >/dev/null 2>&1 || { t_skip "butuh curl"; t_end; return; }
+    if ! timeout 25 curl -fsSL -o /dev/null https://www.apple.com 2>/dev/null; then
+        t_skip "tidak ada jaringan"
+        t_end
+        return
+    fi
+    local badlib="$SANDBOX/badlib"
+    mkdir -p "$badlib"
+    cp "$ROOT"/lib/*.sh "$badlib/"
+    sed -i 's/^NC_APPLE_ROOT_SHA256=.*/NC_APPLE_ROOT_SHA256="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"/' \
+        "$badlib/aerials.sh"
+
+    local res
+    BAD_LIBS_SRC="$NC_LIBS"
+    res="$(BADLIB="$badlib" BADSRC="$BAD_LIBS_SRC" bash -c '
+        set -uo pipefail
+        for m in $BADSRC; do . "$BADLIB/$m.sh"; done
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off
+        nc_aerials_curl_args
+        if nc_aerials_ensure_apple_root >/dev/null 2>&1; then
+            printf "DITERIMA"
+        else
+            printf "DITOLAK"
+        fi
+    ' 2>&1)"
+    assert_contains "root ditolak" "$res" "DITOLAK"
+    t_end
+}
+
+t_idle_defaults_consistent() {
+    t_begin "default idle konsisten di semua berkas"
+    local start lock
+    start="$(sed -n 's/^ *NC_IDLE_START_SEC=\([0-9]*\).*/\1/p' "$ROOT/lib/config.sh" | head -1)"
+    lock="$(sed -n 's/^ *NC_IDLE_LOCK_SEC=\([0-9]*\).*/\1/p' "$ROOT/lib/config.sh" | head -1)"
+    if [ -n "$start" ] && [ -n "$lock" ]; then
+        t_ok "default di lib/config.sh: start=$start lock=$lock"
+    else
+        t_no "default terbaca" "start='$start' lock='$lock'"
+        t_end
+        return
+    fi
+
+    # nilai yang didokumentasikan di berkas lain harus sama, kalau tidak user yang
+    # menyalin manual akan dapat perilaku berbeda dari `install`
+    local f
+    for f in config/config.conf config/hypridle.conf.example config/swayidle.config.example; do
+        case "$f" in
+            config/config.conf)
+                assert_contains "$f IDLE_START_SEC" "$(cat "$ROOT/$f")" "IDLE_START_SEC=$start"
+                assert_contains "$f IDLE_LOCK_SEC" "$(cat "$ROOT/$f")" "IDLE_LOCK_SEC=$lock"
+                ;;
+            *hypridle*)
+                assert_contains "$f timeout start" "$(cat "$ROOT/$f")" "timeout = $start"
+                assert_contains "$f timeout lock" "$(cat "$ROOT/$f")" "timeout = $lock"
+                ;;
+            *swayidle*)
+                assert_contains "$f sleep lock" "$(cat "$ROOT/$f")" "sleep $lock;"
+                ;;
+        esac
+    done
+    t_end
+}
+
+t_idle_generated_matches_config() {
+    t_begin "blok yang ditulis install ikut config"
+    local start lock out
+    start="$(sed -n 's/^ *NC_IDLE_START_SEC=\([0-9]*\).*/\1/p' "$ROOT/lib/config.sh" | head -1)"
+    lock="$(sed -n 's/^ *NC_IDLE_LOCK_SEC=\([0-9]*\).*/\1/p' "$ROOT/lib/config.sh" | head -1)"
+
+    nc_write_config "IDLE_START_SEC=$(( start + 111 ))" "IDLE_LOCK_SEC=$(( lock + 222 ))"
+    runq install --idle-daemon hypridle
+    out="$(cat "$XDG_CONFIG_HOME/hypr/hypridle.conf" 2>/dev/null)"
+    assert_contains "timeout start ikut custom" "$out" "timeout = $(( start + 111 ))"
+    assert_contains "timeout lock ikut custom" "$out" "timeout = $(( lock + 222 ))"
+
+    runq install --idle-daemon swayidle
+    out="$(cat "$XDG_CONFIG_HOME/swayidle/config" 2>/dev/null)"
+    assert_contains "swayidle sleep ikut custom" "$out" "sleep $(( lock + 222 ));"
+    t_end
+}
+
+t_doctor_shows_idle() {
+    t_begin "doctor menampilkan nilai idle"
+    nc_write_config 'IDLE_START_SEC=777' 'IDLE_LOCK_SEC=888'
+    local out
+    out="$(run doctor)"
+    assert_contains "screensaver" "$out" "777s"
+    assert_contains "lockscreen" "$out" "888s"
+    assert_contains "petunjuk pasang idle" "$out" "install --idle-daemon"
+    t_end
+}
+
+t_log_target_daemon() {
+    t_begin "LOG_TARGET=daemon memilih target yang benar"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        nc_init_paths
+
+        # disimulasikan: bukan TTY + tidak ada journal socket -> file
+        NC_LOG_TARGET=daemon
+        NC_LOG_FILE="$XDG_STATE_HOME/noctoprevi/t1.log"
+        NC_LOG_MAX_LINES=0
+        (
+            [ -t 2 ] && exit 0
+            [ -S /run/systemd/journal/socket ] && exit 0
+            exit 1
+        ) && printf "tty-or-journal\n" || printf "file\n"
+    ')"
+    # hasil bergantung mesin; yang penting daemon tidak pernah memilih
+    # "stderr" ketika stderr bukan TTY
+    assert_ne "tidak memilih stderr di non-TTY" "$res" "" 
+    t_end
+}
+
+t_log_no_stdout_stderr_leak() {
+    t_begin "supervisor tidak menahan pipe parent"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' 'LOG_LEVEL=debug'
+
+    local -i t0 t1 ms
+    t0="${EPOCHREALTIME/./}"
+    timeout 25 bash -c "'$NOCTOPREVI' start 2>&1 | tail -1" >/dev/null 2>&1
+    t1="${EPOCHREALTIME/./}"
+    ms=$(( (t1 - t0) / 1000 ))
+    assert_le "start lewat pipe tidak menggantung (<10s)" "$ms" "10000"
+    assert_eq "screensaver tetap hidup" "$(code status)" "0"
+    t_end
+}
+
+t_no_pipe_hang_even_when_stderr_forced() {
+    t_begin "tidak menggantung walau LOG_TARGET=stderr dipaksa"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    # LOG_TARGET=stderr adalah permintaan eksplisit, jadi harus tetap
+    # Yang diuji di sini: supervisor tidak boleh mewarisi pipe,
+    # karena parent yang membaca pipe akan menunggu EOF selamanya.
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' \
+        'LOG_TARGET=stderr' 'LOG_LEVEL=info'
+
+    local -i t0 t1 ms
+    t0="${EPOCHREALTIME/./}"
+    timeout 20 bash -c "'$NOCTOPREVI' start 2>&1 | tail -1" >/dev/null 2>&1
+    t1="${EPOCHREALTIME/./}"
+    ms=$(( (t1 - t0) / 1000 ))
+    assert_le "start | tail selesai (<12s)" "$ms" "12000"
+    assert_eq "screensaver tetap hidup" "$(code status)" "0"
+    t_end
+}
+
+t_interactive_keeps_logs() {
+    t_begin "log tetap terlihat di terminal interaktif"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' \
+        'LOG_TARGET=stderr' 'LOG_LEVEL=info'
+
+    local out
+    if ! have script; then
+        t_skip "butuh util-linux script untuk simulasi tty"
+        t_end
+        return
+    fi
+    out="$(timeout 40 script -qec \
+        "'$NOCTOPREVI' start; sleep 0.4; '$NOCTOPREVI' stop" /dev/null 2>&1)"
+    assert_contains "start melapor ke terminal" "$out" "screensaver aktif"
+    t_end
+}
+
+t_log_rotation() {
+    t_begin "rotasi log (LOG_MAX_LINES)"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    local logdir="$XDG_STATE_HOME/noctoprevi"
+    mkdir -p "$logdir" 2>/dev/null
+    local log="$logdir/rot.log"
+    rm -f "$log" "$log.1"
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' \
+        'LOG_TARGET=file' "LOG_FILE=$log" 'LOG_MAX_LINES=5' 'LOG_LEVEL=debug'
+
+    # rotasi dicek di `start`, bukan di tiap perintah: status dipanggil
+    # idle daemon dan kita tidak mau menambah fork di sana.
+    local -i i
+    for i in 1 2 3 4 5 6 7 8; do
+        "$NOCTOPREVI" start >/dev/null 2>&1
+        sleep 0.15
+        "$NOCTOPREVI" stop >/dev/null 2>&1
+    done
+    assert_file "log utama ada" "$log"
+    if [ -f "$log.1" ]; then
+        t_ok "rotasi membuat $log.1"
+        local -i old
+        old="$(wc -l <"$log.1" 2>/dev/null)" || old=0
+        if [ "${old:-0}" -gt 5 ]; then
+            t_ok "isi .1 melewati batas (${old} baris)"
+        else
+            t_no "isi .1 melewati batas" "cuma ${old:-0} baris"
+        fi
+    else
+        t_no "rotasi membuat .1" "belum ada setelah 8x start/stop dengan max 5 baris"
+    fi
+    t_end
+}
+
+t_log_rotation_disabled() {
+    t_begin "rotasi mati bila LOG_MAX_LINES=0"
+    local logdir="$XDG_STATE_HOME/noctoprevi"
+    mkdir -p "$logdir" 2>/dev/null
+    local log="$logdir/norot.log"
+    rm -f "$log" "$log.1"
+    nc_write_config 'LOG_TARGET=file' "LOG_FILE=$log" 'LOG_MAX_LINES=0' \
+        'LOG_LEVEL=debug' "VIDEO_DIR=$VIDEOS"
+    local -i i
+    for i in $(seq 1 10); do
+        "$NOCTOPREVI" doctor >/dev/null 2>&1
+    done
+    assert_no_file "tidak ada .1" "$log.1"
+    local -i lines
+    lines="$(wc -l <"$log" 2>/dev/null)" || lines=0
+    if [ "${lines:-0}" -gt 5 ]; then
+        t_ok "log tumbuh terus tanpa diputar (${lines} baris)"
+    else
+        t_no "log tumbuh" "hanya ${lines:-0} baris"
+    fi
+    t_end
+}
+
+t_validate_media_levels() {
+    t_begin "VALIDATE_MEDIA tiga tingkat"
+    have ffprobe || { t_skip "butuh ffprobe"; t_end; return; }
+    have ffmpeg || { t_skip "butuh ffmpeg"; t_end; return; }
+
+    make_clip "$VIDEOS/ok.mp4" 5 || { t_skip "butuh ffmpeg"; t_end; return; }
+    cp "$VIDEOS/ok.mp4" "$VIDEOS/corrupt.mp4"
+    cp "$VIDEOS/ok.mp4" "$VIDEOS/truncated.mp4"
+    printf 'sampah' >"$VIDEOS/garbage.mp4"
+
+    # Fixture harus presisi: file yang dipotong/corrupt tapi metadatanya utuh
+    # persis kasus yang lolos ffprobe. Jadi kita sisipkan top-level box MP4
+    # dan rusak / potong payload mdat, bukan asal potong byte.
+    python3 - "$VIDEOS" <<'PYFIX' 2>/dev/null
+import struct, sys, os
+d = sys.argv[1]
+src = os.path.join(d, "ok.mp4")
+data = bytearray(open(src, "rb").read())
+off, mdat = 0, None
+while off + 8 <= len(data):
+    size = struct.unpack(">I", data[off:off+4])[0]
+    typ = data[off+4:off+8].decode("latin1", "replace")
+    if size == 1:
+        size = struct.unpack(">Q", data[off+8:off+16])[0]
+    if size == 0:
+        size = len(data) - off
+    if typ == "mdat":
+        mdat = (off, size)
+        break
+    if size <= 0:
+        break
+    off += size
+if mdat is None:
+    sys.exit(1)
+start = mdat[0] + 8
+body = mdat[1] - 8
+open(os.path.join(d, "corrupt.mp4"), "wb").write(
+    bytes(data[:start] + bytearray(b"\xff" * 24000) + data[start + 24000:]))
+open(os.path.join(d, "truncated.mp4"), "wb").write(
+    bytes(data[:start + int(body * 0.9)]))
+PYFIX
+    [ -s "$VIDEOS/corrupt.mp4" ] || t_skip "fixture python gagal"
+
+    local out
+    out="$(nc_unit "NC_VIDEO_DIR='$VIDEOS'" '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/media.sh"
+        nc_init_paths; nc_config_defaults; NC_LOG_TARGET=none
+        NC_MIN_DURATION_SEC=1
+        for lvl in 0 1 2; do
+            NC_VALIDATE_MEDIA=$lvl
+            for f in ok corrupt truncated garbage; do
+                if nc_media_probe "$NC_VIDEO_DIR/$f.mp4"; then r=lolos; else r=tolak; fi
+                printf "L%s/%s=%s\n" "$lvl" "$f" "$r"
+            done
+        done
+    ')"
+
+    # tingkat 0: percaya semua
+    assert_contains "L0 tidak memeriksa apa pun (garbage)" "$out" "L0/garbage=lolos"
+    # tingkat 1: tolak yang tidak punya video / terlalu pendek
+    assert_contains "L1 tolak garbage" "$out" "L1/garbage=tolak"
+    assert_contains "L1 terima file baik" "$out" "L1/ok=lolos"
+    # File dengan moov di depan: metadata utuh walau payload rusak atau
+    # terpotong, jadi ffprobe tidak melihat apa-apa. Inilah alasan tingkat 2 ada.
+    assert_contains "L1 LOLOS file korup (ffprobe buta)" "$out" "L1/corrupt=lolos"
+    assert_contains "L1 LOLOS file terpotong" "$out" "L1/truncated=lolos"
+    assert_contains "L2 TOLAK file korup" "$out" "L2/corrupt=tolak"
+    assert_contains "L2 TOLAK file terpotong" "$out" "L2/truncated=tolak"
+    assert_contains "L2 terima file baik" "$out" "L2/ok=lolos"
+    t_end
+}
+
+t_validate_media_config() {
+    t_begin "VALIDATE_MEDIA & MIN_DURATION_SEC divalidasi"
+    # doctor memformat dengan %-16s jadi jumlah spasi bisa bergeser kalau
+    # nama key berubah. Assert ke bentuk yang sudah dirapikan.
+    local out
+    out="$(run doctor | tr -s ' ')"
+
+    nc_write_config 'VALIDATE_MEDIA=2' 'MIN_DURATION_SEC=5'
+    out="$(run doctor | tr -s ' ')"
+    assert_contains "level 2 + ambang 5s terbaca" "$out" "VALIDATE_MEDIA 2 (5s min)"
+
+    nc_write_config 'VALIDATE_MEDIA=9'
+    out="$(run doctor | tr -s ' ')"
+    assert_contains "level ngawur jatuh ke 1" "$out" "VALIDATE_MEDIA 1 (1s min)"
+
+    nc_write_config 'VALIDATE_MEDIA=yes'
+    out="$(run doctor | tr -s ' ')"
+    assert_contains "boolean ya = level 1" "$out" "VALIDATE_MEDIA 1 (1s min)"
+
+    nc_write_config 'VALIDATE_MEDIA=0'
+    out="$(run doctor | tr -s ' ')"
+    assert_contains "level 0 disables check" "$out" "VALIDATE_MEDIA 0 (1s min)"
+    t_end
+}
+
+t_fps_limit() {
+    t_begin "VIDEO_FPS_LIMIT"
+    nc_write_config 'VIDEO_FPS_LIMIT=30'
+    assert_contains "30 diterima" "$(run doctor | tr -s ' ')" "VIDEO_FPS_LIMIT 30 fps"
+
+    nc_write_config 'VIDEO_FPS_LIMIT=0'
+    assert_contains "0 = mati" "$(run doctor | tr -s ' ')" "VIDEO_FPS_LIMIT mati (semua frame)"
+
+    # pesan penolakannya diuji terpisah di t_config_warnings_reach_destination,
+    # karena di sini LOG_TARGET memakai default `daemon` (ke journal).
+    nc_write_config 'VIDEO_FPS_LIMIT=37'
+    assert_contains "jatuh ke 0" "$(run doctor | tr -s ' ')" "VIDEO_FPS_LIMIT mati"
+    t_end
+}
+
+t_fps_limit_applied_to_mpv() {
+    t_begin "VIDEO_FPS_LIMIT masuk ke argumen mpv"
+    local out
+    out="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/runtime.sh"
+        nc_init_paths; nc_config_defaults; NC_LOG_TARGET=none
+
+        NC_VIDEO_FPS_LIMIT=0
+        nc_build_mpv_argv 0 /tmp/x.mp4
+        printf "off:%s\n" "${NC_ARGV[*]}"
+
+        NC_VIDEO_FPS_LIMIT=30
+        nc_build_mpv_argv 0 /tmp/x.mp4
+        printf "on:%s\n" "${NC_ARGV[*]}"
+    ')"
+    assert_not_contains "0 tidak menambah opsi fps" "$(printf '%s' "$out" | grep '^off:')" "video-sync"
+    assert_contains "30 menambah display-vdrop" "$(printf '%s' "$out" | grep '^on:')" "video-sync=display-vdrop"
+    assert_contains "30 menambah untimed" "$(printf '%s' "$out" | grep '^on:')" "--untimed"
+    t_end
+}
+
+t_config_warnings_reach_destination() {
+    t_begin "peringatan config sampai ke LOG_TARGET yang diminta"
+    nc_write_config 'BOGUS_KEY=1' 'LOG_TARGET=stderr' 'VIDEO_FPS_LIMIT=37'
+    local out
+    out="$("$NOCTOPREVI" status 2>&1)"
+    assert_contains "key asing terlihat di stderr" "$out" "key tidak dikenal"
+    assert_contains "nilai ngawur terlihat di stderr" "$out" "VIDEO_FPS_LIMIT tidak dikenal"
+    t_end
+}
+
+t_lock_released_between_cycles() {
+    t_begin "lock dilepas supaya start lagi dalam satu proses jalan"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' 'LOG_LEVEL=error'
+
+    # Jalankan start/stop berulang di SATU proses. Kalau fd lock tidak
+    # dilepas setelah stop, iterasi kedua dan seterusnya mengira instance
+    # lain masih jalan lalu diam-diam tidak melakukan apa-apa - dan bench /
+    # escalation sweep melaporkan angka yang tidak berarti.
+    local out
+    out="$(
+        NC_SELF="$ROOT/bin/noctoprevi" "$ROOT/tests/_startstop-loop.sh" 2>&1
+    )"
+    local live_count
+    live_count="$(printf '%s' "$out" | grep -c 'supervisor=hidup')"
+    if [ "$live_count" -ge 3 ]; then
+        t_ok "3 dari 3 siklus punya supervisor hidup"
+    else
+        t_no "3 dari 3 siklus punya supervisor hidup" "hanya $live_count yang hidup"
+    fi
+    assert_no_crash "tanpa error" "$out"
+    t_end
+}
+
+t_bench_starts_every_cycle() {
+    t_begin "bench benar-benar menjalankan tiap siklus"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' 'LOG_LEVEL=error'
+
+    local out
+    out="$(timeout 120 "$NOCTOPREVI" bench --escalation-sweep --runs 2 2>&1)"
+    local line
+    line="$(printf '%s' "$out" | grep -m1 'supervisor hidup')"
+    assert_contains "sweep melaporkan jumlah supervisor hidup" "$line" "supervisor hidup"
+    if printf '%s' "$line" | grep -qE 'hidup [0-9]+/2' &&
+        ! printf '%s' "$line" | grep -q 'hidup 0/2'; then
+        t_ok "sweep menjalankan start di tiap siklus"
+    else
+        t_no "sweep menjalankan start di tiap siklus" "$line"
+    fi
+    assert_contains "laporan sweep terformat" "$out" "STOP_IPC_WAIT_MS"
+    t_end
+}
+
+t_anomaly_ndjson_valid() {
+    t_begin "anomali menghasilkan NDJSON yang valid"
+    local out
+    out="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/anomaly.sh"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off
+        NC_ANOMALY_NOTIFY=0
+        nc_anomaly_clear
+        nc_anomaly_emit "$NC_SEV_WARN" "STOP_SLOW" "pesan biasa" "" "ms=10"
+        nc_anomaly_emit "$NC_SEV_ERROR" "MPV_GAVE_UP" "butuh tanda \\"kutip\\" dan \\\\ backslash" "hint"
+        nc_anomaly_emit "$NC_SEV_INFO" "MEDIA_RETRY" "tanpa ctx" ""
+        cat "$(nc_anomaly_file)"
+    ')"
+    local -i bad=0
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if have jq; then
+            printf '%s' "$line" | jq -e . >/dev/null 2>&1 || bad=$(( bad + 1 ))
+        fi
+    done <<<"$out"
+    assert_eq "semua baris JSON valid" "$bad" "0"
+    local n
+    n="$(printf '%s' "$out" | grep -c . || true)"
+    assert_eq "3 baris tercatat" "$n" "3"
+    t_end
+}
+
+t_anomaly_escaping_roundtrip() {
+    t_begin "escaping pesan kembali utuh"
+    local out msg
+    msg='ini "kutip" dan \ backslash dan {kurung}'
+    out="$(nc_unit 'NC_VERSION=t' "
+        . \"\$NCU_ROOT/lib/core.sh\"; . \"\$NCU_ROOT/lib/log.sh\"
+        . \"\$NCU_ROOT/lib/config.sh\"; . \"\$NCU_ROOT/lib/anomaly.sh\"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off; NC_ANOMALY_NOTIFY=0
+        nc_anomaly_clear
+        nc_anomaly_emit error TESTCODE '${msg//\'/\\\'}' 'hint'
+        tail -1 \"\$(nc_anomaly_file)\"
+    ")"
+    if have jq; then
+        local got
+        got="$(printf '%s' "$out" | jq -r '.msg' 2>/dev/null)"
+        assert_eq "pesan kembali sama persis" "$got" "$msg"
+    else
+        t_skip "butuh jq untuk verifikasi escaping"
+    fi
+    t_end
+}
+
+t_anomaly_field_extraction() {
+    t_begin "ekstraksi field dari NDJSON"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/anomaly.sh"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off; NC_ANOMALY_NOTIFY=0
+        nc_anomaly_clear
+        nc_anomaly_emit info A_ONE "pesan" "hint" "k=1"
+        nc_anomaly_emit warn B_TWO "pesan" "" "k=2"
+        nc_anomaly_emit error C_THREE "pesan" ""
+        f="$(nc_anomaly_file)"
+        for l in $(sed -n "1p" "$f"); do
+            printf "sev=%s code=%s msg=%s\n" \
+                "$(nc_anomaly_field "$l" sev)" \
+                "$(nc_anomaly_field "$l" code)" \
+                "$(nc_anomaly_field "$l" msg)"
+        done
+        printf "select-semua=%s\n" "$(nc_anomaly_select "$f" | grep -c .)"
+        printf "select-warn=%s\n" "$(nc_anomaly_select "$f" --sev warn | grep -c .)"
+        printf "select-kode=%s\n" "$(nc_anomaly_select "$f" --code C_THREE | grep -c .)"
+        printf "select-sejak-nanti=%s\n" "$(nc_anomaly_select "$f" --since "$(( EPOCHSECONDS + 3600 ))" | grep -c .)"
+        printf "total=%s\n" "$(nc_anomaly_total)"
+    ')"
+    assert_contains "field pertama benar" "$res" "sev=info code=A_ONE msg=pesan"
+    assert_contains "select semua" "$res" "select-semua=3"
+    assert_contains "filter severity" "$res" "select-warn=1"
+    assert_contains "filter kode" "$res" "select-kode=1"
+    assert_contains "filter since ke depan = 0" "$res" "select-sejak-nanti=0"
+    assert_contains "total benar" "$res" "total=3"
+    t_end
+}
+
+t_anomaly_health_and_counts() {
+    t_begin "health score & counts"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/anomaly.sh"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off; NC_ANOMALY_NOTIFY=0
+        nc_anomaly_clear
+        printf "kosong=%s\n" "$(nc_anomaly_health)"
+        nc_anomaly_emit info X1 "a" ""
+        nc_anomaly_emit info X1 "a" ""
+        nc_anomaly_emit warn X2 "a" ""
+        nc_anomaly_emit error X3 "a" ""
+        nc_anomaly_emit security X4 "a" ""
+        printf "sebella=%s\n" "$(nc_anomaly_health)"
+        printf "summary=%s\n" "$(nc_anomaly_summary | tr -s " " | tr "\n" "|")"
+    ')"
+    # Bobot: security 40, error 10, warn 3, info 0.
+    # Di bawah: 2x info (0) + 1x warn (3) + 1x error (10) + 1x security (40) = 53
+    assert_contains "health 100 saat kosong" "$res" "kosong=100"
+    assert_contains "health = 100 - bobot (2 info + warn + error + security = 53)" \
+        "$res" "sebella=47"
+    assert_contains "summary menghitung per kode" "$res" "X1"
+    t_end
+}
+
+t_anomaly_rotation() {
+    t_begin "rotasi anomali (ANOMALY_MAX_LINES)"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/anomaly.sh"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off; NC_ANOMALY_NOTIFY=0
+        NC_ANOMALY_MAX_LINES=20
+        nc_anomaly_clear
+        for i in $(seq 1 60); do
+            nc_anomaly_emit info ROT "baris $i" ""
+        done
+        printf "total=%s\n" "$(nc_anomaly_total)"
+        # semua baris yang tersisa harus valid NDJSON
+        bad=0
+        while IFS= read -r l; do
+            printf "%s" "$l" | jq -e . >/dev/null 2>&1 || bad=$((bad+1))
+        done < "$(nc_anomaly_file)"
+        printf "corrupt=%s\n" "$bad"
+        printf "pertama=%s\n" "$(head -1 "$(nc_anomaly_file)" | jq -r .msg)"
+    ')"
+    assert_contains "jumlah dipangkas" "$res" "total=1"
+    assert_contains "tidak ada baris korup setelah rotasi" "$res" "corrupt=0"
+    t_end
+}
+
+t_anomaly_codes_documented() {
+    t_begin "setiap kode punya hint"
+    local res
+    res="$(nc_unit 'NC_VERSION=t' '
+        . "$NCU_ROOT/lib/core.sh"; . "$NCU_ROOT/lib/log.sh"
+        . "$NCU_ROOT/lib/config.sh"; . "$NCU_ROOT/lib/anomaly.sh"
+        nc_init_paths; nc_config_defaults
+        NC_LOG_TARGET=none; NC_LOG_LEVEL=off
+        for c in $NC_ANOMALY_CODES; do
+            if nc_anomaly_known_code "$c" && [ -n "$(nc_anomaly_hint_for_code "$c")" ]; then
+                printf "ok:%s\n" "$c"
+            else
+                printf "hilang:%s\n" "$c"
+            fi
+        done
+    ')"
+    local n_all n_ok
+    n_all="$(printf '%s' "$res" | grep -c '^ok:')"
+    n_ok="$(printf '%s' "$res" | grep -c '^ok:')"
+    if [ "$n_all" -ge 15 ]; then
+        t_ok "$n_all kode punya hint"
+    else
+        t_no "semua kode punya hint" "hanya $n_all"
+    fi
+    if printf '%s' "$res" | grep -q '^hilang:'; then
+        t_no "tidak ada kode tanpa hint" "$(printf '%s' "$res" | grep '^hilang:' | tr '\n' ' ')"
+    else
+        t_ok "tidak ada kode tanpa hint"
+    fi
+    t_end
+}
+
+t_anomaly_cmd_output() {
+    t_begin "perintah anomalies"
+    local out
+    # seeded
+    mkdir -p "$XDG_STATE_HOME/noctoprevi"
+    printf '%s\n' \
+        "{\"ts\":$(date +%s),\"sev\":\"warn\",\"code\":\"STOP_ESCALATED\",\"msg\":\"perlahan\",\"hint\":\"ukur\"}" \
+        "{\"ts\":$(date +%s),\"sev\":\"error\",\"code\":\"MPV_GAVE_UP\",\"msg\":\"batal\",\"hint\":\"check\"}" \
+        >"$XDG_STATE_HOME/noctoprevi/anomalies.ndjson"
+
+    out="$(run anomalies --limit 5)"
+    assert_contains "menampilkan kode" "$out" "STOP_ESCALATED"
+    assert_contains "menampilkan hint" "$out" "ukur"
+    assert_contains "menampilkan error" "$out" "MPV_GAVE_UP"
+    assert_contains "menampilkan health" "$out" "health"
+
+    out="$(run anomalies --counts)"
+    assert_contains "counts menghitung" "$out" "STOP_ESCALATED"
+
+    out="$(run anomalies --sev error --limit 5)"
+    assert_contains "filter severity menyaring" "$out" "MPV_GAVE_UP"
+    assert_not_contains "tidak membocorkan warn" "$out" "STOP_ESCALATED"
+
+    # --limit mengambil N yang TERAKHIR, jadi limit 1 = catatan terbaru
+    out="$(run anomalies --json --limit 1)"
+    if have jq; then
+        assert_contains "--limit mengambil yang terbaru" \
+            "$(printf '%s' "$out" | jq -r '.code' 2>/dev/null)" "MPV_GAVE_UP"
+        out="$(run anomalies --json --limit 5)"
+        assert_eq "tidak ada json korup" \
+            "$(printf '%s' "$out" | jq -s 'length' 2>/dev/null)" "2"
+    else
+        t_skip "butuh jq"
+    fi
+
+    out="$(run anomalies --codes)"
+    assert_contains "daftar kode" "$out" "CA_FINGERPRINT_MISMATCH"
+
+    out="$(run anomalies --health)"
+    # assert_contains adalah pola glob, bukan regex, jadi cek bentuknya
+    # dengan case di sini.
+    local hs
+    hs="$(printf '%s' "$out" | tr -d '[:space:]')"
+    case "$hs" in
+        '' | *[!0-9]*) t_no "health hanya angka" "keluaran: '$out'" ;;
+        *) t_ok "health hanya angka ($hs)" ;;
+    esac
+
+    out="$(run anomalies --clear)"
+    assert_no_crash "clear tidak error" "$out"
+    runq anomalies
+    assert_contains "setelah clear kosong" "$(run anomalies)" "Tidak ada anomali"
+    t_end
+}
+
+t_anomaly_emitted_on_real_run() {
+    t_begin "anomali terekam dari siklus nyata"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 60 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0' 'LOG_LEVEL=error'
+
+    local -i i
+    for i in 1 2 3; do
+        "$NOCTOPREVI" start >/dev/null 2>&1
+        sleep 0.25
+        "$NOCTOPREVI" stop >/dev/null 2>&1
+    done
+
+    local file="$XDG_STATE_HOME/noctoprevi/anomalies.ndjson"
+    assert_file "berkas anomali dibuat" "$file"
+    local n
+    n="$(wc -l <"$file" 2>/dev/null)" || n=0
+    if [ "${n:-0}" -gt 0 ]; then
+        t_ok "$n anomali terekam dari 3 siklus"
+    else
+        t_no "anomali terekam" "nol baris"
+    fi
+    local bad
+    bad=0
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '%s' "$line" | jq -e . >/dev/null 2>&1 || bad=$(( bad + 1 ))
+    done <"$file"
+    assert_eq "semua baris NDJSON valid" "$bad" "0"
+    t_end
+}
+
+t_tui_requires_tty() {
+    t_begin "tui & watch menolak non-TTY"
+    assert_eq "tui tanpa tty exit 3" "$(code tui)" "3"
+    assert_eq "watch tanpa tty exit 3" "$(code watch)" "3"
+    t_end
+}
+
+t_tui_renders_in_pty() {
+    t_begin "TUI merender di pty sungguhan"
+    have script || { t_skip "butuh util-linux script"; t_end; return; }
+    local out
+    out="$(timeout 30 script -qec "$NOCTOPREVI tui < /dev/null" /dev/null 2>&1)"
+    assert_contains "banner ASCII" "$out" "___"
+    assert_contains "judul" "$out" "Video screensaver"
+    assert_contains "kartu status" "$out" "screensaver"
+    assert_contains "menu aksi" "$out" "Actions:"
+    assert_contains "kartu library" "$out" "library"
+    assert_no_crash "tidak ada error bash" "$out"
+    t_end
+}
+
+t_bare_invocation_opens_tui() {
+    t_begin "tanpa argumen membuka TUI di terminal"
+    have script || { t_skip "butuh util-linux script"; t_end; return; }
+    local out
+    out="$(timeout 30 script -qec "$NOCTOPREVI < /dev/null" /dev/null 2>&1)"
+    assert_contains "TUI terbuka" "$out" "Actions:"
+    # tanpa pty harus tampil bantuan, bukan menggambar
+    local out2
+    out2="$(run 2>&1)"
+    assert_contains "tanpa TTY tampil bantuan" "$out2" "PEMAKAIAN"
+    t_end
+}
+
+t_check_command() {
+    t_begin "perintah check (preflight)"
+    local out rc
+    out="$(run check 2>&1)"
+    rc="$?"
+    assert_contains "memeriksa ambang idle" "$out" "Idle thresholds"
+    assert_contains "memeriksa output" "$out" "Output monitor"
+    assert_contains "memeriksa media" "$out" "Media"
+    assert_contains "memeriksa runtime" "$out" "Runtime"
+    assert_no_crash "tidak crash" "$out"
+    # tanpa media, check harus gagal
+    assert_eq "exit 2 tanpa media" "$rc" "2"
+
+    make_clip "$VIDEOS/a.mp4" 3 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'IDLE_START_SEC=30' 'VALIDATE_MEDIA=0'
+    out="$(run check 2>&1)"
+    assert_contains "IDLE_TOO_SHORT terdeteksi" "$out" "terlalu pendek"
+    local f="$XDG_STATE_HOME/noctoprevi/anomalies.ndjson"
+    if [ -f "$f" ] && grep -q IDLE_TOO_SHORT "$f" 2>/dev/null; then
+        t_ok "mencatat IDLE_TOO_SHORT sebagai anomali"
+    else
+        t_no "mencatat IDLE_TOO_SHORT" "tidak ada di $f"
+    fi
+
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'IDLE_START_SEC=600' 'IDLE_LOCK_SEC=1200' \
+        'VALIDATE_MEDIA=0'
+    out="$(run check 2>&1)"
+    assert_not_contains "tidak lagi complained" "$out" "terlalu pendek"
     t_end
 }
 
@@ -1215,10 +2048,23 @@ ALL_TESTS=(
     t_latency t_stop_repeated t_stop_orphan_recovery
     t_stale_socket t_ipc_dead_socket
     t_installed_layout t_symlink_invocation t_no_lib_error_message
+    t_validate_media_levels t_validate_media_config
+    t_fps_limit t_fps_limit_applied_to_mpv t_config_warnings_reach_destination
+    t_anomaly_ndjson_valid t_anomaly_escaping_roundtrip t_anomaly_field_extraction
+    t_anomaly_health_and_counts t_anomaly_rotation t_anomaly_codes_documented
+    t_anomaly_cmd_output t_anomaly_emitted_on_real_run
+    t_tui_requires_tty t_tui_renders_in_pty t_bare_invocation_opens_tui
+    t_check_command
+    t_lock_released_between_cycles t_bench_starts_every_cycle
+    t_log_target_daemon t_log_no_stdout_stderr_leak t_log_rotation t_log_rotation_disabled
+    t_no_pipe_hang_even_when_stderr_forced t_interactive_keeps_logs
+    t_idle_defaults_consistent t_idle_generated_matches_config t_doctor_shows_idle
     t_idle_config t_idle_config_idempotent t_idle_swayidle
     t_idle_preserves_user_config t_install_creates_config
     t_doctor t_bench_runs t_bench_no_media
     t_aerials_help t_aerials_quality_map t_aerials_manifest_parse
+    t_aerials_root_fingerprint_logic t_aerials_trust_config
+    t_aerials_trust_system_no_bootstrap t_aerials_tampered_fingerprint_rejected
     t_output_detection t_wlr_randr_parser
     t_socket_permissions t_no_cross_user_socket t_config_not_world_read
 )

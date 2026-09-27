@@ -1,7 +1,7 @@
-# shellcheck shell=bash disable=SC2034,SC2148
 # Maintainer: noctoprevi contributors
+# shellcheck shell=bash disable=SC2034,SC2148
 pkgname=noctoprevi
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Modular Wayland video screensaver for Noctalia, Hyprland, Sway and Niri"
 arch=('x86_64' 'aarch64')
@@ -11,27 +11,33 @@ depends=('mpv' 'socat' 'util-linux')
 optdepends=(
   'ffmpeg: unduh dan proses koleksi Apple TV Aerial'
   'ffprobe: validasi file media sebelum diputar'
-  'jq: deteksi output monitor untuk MONITOR_MODE=all'
+  'jq: deteksi output monitor untuk MONITOR_MODE=all dan katalog aerials'
   'hypridle: pemicu idle di Hyprland'
   'swayidle: pemicu idle di Sway dan Niri'
   'libva-utils: laporan profil VA-API di `noctoprevi doctor`'
   'noctalia-shell: lockscreen lewat `noctalia msg lock`'
 )
 makedepends=()
-source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP')
+source=("noctoprevi-${pkgver}.tar.gz")
+sha256sums=('5046bb8da8c23a768eb1e29918abfd6bde2885bc96d70639b291cf3691226058')
 
-# Ganti dengan URL rilis sebenarnya sebelum publikasi:
-# source=("$pkgname-$pkgver.tar.gz")
-# sha256sums=('SKIP')
+# Versi dibaca dari lib/core.sh supaya tidak ada nomor yang dobel di dua
+# tempat. Kalau keduanya tidak cocok, build berhenti dengan pesan jelas -
+# lebih baik daripada diam-diam menghasilkan paket dengan versi salah.
+_ver=$(sed -n 's/^NC_VERSION="\(.*\)"/\1/p' "$srcdir/noctoprevi-$pkgver/lib/core.sh" | head -1)
+if [ "$_ver" != "$pkgver" ]; then
+    echo "PKGBUILD: pkgver=$pkgver tapi lib/core.sh berisi $_ver" >&2
+    echo "         samakan keduanya sebelum membangun." >&2
+    exit 1
+fi
 
 package() {
-    cd "$srcdir/$pkgname-$pkgver" || return 1
+    cd "$srcdir/noctoprevi-${pkgver}"
 
     install -Dm755 bin/noctoprevi "$pkgdir/usr/bin/noctoprevi"
 
     local lib
-    for lib in core log config media ipc runtime cmd setup aerials; do
+    for lib in core log config anomaly anomaly_cmd tui media ipc runtime cmd setup aerials; do
         install -Dm644 "lib/$lib.sh" "$pkgdir/usr/lib/noctoprevi/$lib.sh"
     done
 
@@ -40,21 +46,25 @@ package() {
         "$pkgdir/usr/share/doc/$pkgname/hypridle.conf.example"
     install -Dm644 config/swayidle.config.example \
         "$pkgdir/usr/share/doc/$pkgname/swayidle.config.example"
-
+    install -Dm644 packaging/noctoprevi.1 "$pkgdir/usr/share/man/man1/noctoprevi.1"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -Dm644 packaging/noctoprevi.1 "$pkgdir/usr/share/man/man1/noctoprevi.1"
+    install -Dm644 Makefile "$pkgdir/usr/share/doc/$pkgname/Makefile"
 
+    # Tidak ada daemon yang di-enable di paket: integrasi idle cukup
+    # hypridle/swayidle yang sudah ada, dan configured per-pengguna lewat
+    # `noctoprevi install --idle-daemon ...`.
+    printf '%s\n' \
+        "# uninstall bersih" \
+        "#   pacman -Rns noctoprevi" \
+        "# config dan video di ~/.config/noctoprevi TIDAK ikut terhapus." \
+        "# Hapus manual bila memang tidak diperlukan:" \
+        "#   rm -rf ~/.config/noctoprevi" \
+        >"$pkgdir/usr/share/doc/$pkgname/UNINSTALL"
+}
 
-    install -Dm644 "$pkgname.install" "$pkgdir/etc/pacman.d/$pkgname.install" 2>/dev/null || true
-
-    install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user-noctoprevi-check.service" <<'UNIT'
-[Unit]
-Description=noctoprevi: verifikasi konfigurasi screensaver
-Documentation=man:noctoprevi(1)
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/noctoprevi doctor
-StandardOutput=journal
-UNIT
+check() {
+    cd "$srcdir/noctoprevi-${pkgver}"
+    make lint
+    make test
 }

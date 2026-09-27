@@ -12,15 +12,27 @@
 #      swaymsg reload
 #
 # Yang terjadi:
-#   300 detik tanpa input   ->  screensaver video menyala fullscreen
+#   600 detik tanpa input   ->  screensaver video menyala fullscreen
 #   ada input mouse/keyboard ->  screensaver mati, layar langsung normal
-#   900 detik tanpa input   ->  lockscreen Noctalia terkunci
+#   1200 detik tanpa input  ->  lockscreen Noctalia terkunci
 #
 # Kenapa locking pakai exec_on_idle dengan sleep, bukan listener terpisah:
 #   swayidle hanya punya satu timer idle (timeout=), jadi "kunci setelah
 #   900 detik" ditulis sebagai perintah yang tidur lebih dulu lalu
 #   mematikan screensaver dan mengunci. Screensaver dimatikan dulu supaya
 #   lockscreen tidak muncul di atas video yang sedang diputar.
+#
+# Pintasan manual. Ganti <binder> dengan yang kamu pakai, atau pakai blok
+# dari swayidle(5) yang sudah kamu pakai. Screensaver tidak akan menyala
+# selama kamu memencet tombol ini, dan menyala lagi setelah idle 600 detik.
+#
+#   bindsym $mod+Shift+a exec noctoprevi toggle
+#   bindsym $mod+Shift+a exec noctoprevi start
+#   bindsym $mod+Shift+a exec noctoprevi next
+#   bindsym $mod+Shift+a exec noctoprevi stop
+#
+# Untuk Niri, binding-nya ditulis di nirc(5), bukan di file ini:
+#   Mod+Shift+a { spawn "noctoprevi" "toggle"; }
 #
 # systemd user service supaya swayidle ikut hidup:
 #   systemctl --user enable --now swayidle
@@ -30,7 +42,7 @@
 # Di-generate ulang dengan: noctoprevi install --idle-daemon swayidle
 
 exec_while_idle = noctoprevi start
-exec_on_idle = sleep 900; noctoprevi stop; noctalia msg lock
+exec_on_idle = sleep 1200; noctoprevi stop; noctalia msg lock
 exec_idle_deadline = 0
 exec_on_resume = noctoprevi stop
 # <<< noctoprevi <<<

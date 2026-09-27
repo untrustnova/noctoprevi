@@ -3,9 +3,9 @@
 # noctoprevi - core: konstanta, path XDG, utilitas dasar.
 # Di-source oleh bin/noctoprevi. Tidak boleh keluar/exit di sini.
 
-NC_VERSION="1.0.0"
+NC_VERSION="1.1.0"
 NC_APP="noctoprevi"
-NC_TAGLINE="Modular Wayland video screensaver for Noctalia/Hyprland/Niri"
+NC_TAGLINE="Modular Wayland video screensaver for Noctalia, Hyprland, Sway and Niri"
 
 NC_EXIT_OK=0
 NC_EXIT_RUNNING=0
@@ -15,9 +15,12 @@ NC_EXIT_USAGE=3
 
 NC_SUN_PATH_MAX=100
 
+# $1 = pesan, $2 = kode keluar (opsional). Pesannya hanya $1 - bukan $* -
+# kalau pakai $*, kode keluarnya ikut tercetak di pesan.
 nc_die() {
+    local msg="${1:-}"
     local code="${2:-$NC_EXIT_ERROR}"
-    printf '%s: %s\n' "$NC_APP" "$*" >&2
+    printf '%s: %s\n' "$NC_APP" "$msg" >&2
     exit "$code"
 }
 

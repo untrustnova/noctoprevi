@@ -1,0 +1,60 @@
+# shellcheck shell=bash disable=SC2034,SC2148
+# Maintainer: noctoprevi contributors
+pkgname=noctoprevi
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Modular Wayland video screensaver for Noctalia, Hyprland, Sway and Niri"
+arch=('x86_64' 'aarch64')
+url="https://github.com/noctoprevi/noctoprevi"
+license=('MIT')
+depends=('mpv' 'socat' 'util-linux')
+optdepends=(
+  'ffmpeg: unduh dan proses koleksi Apple TV Aerial'
+  'ffprobe: validasi file media sebelum diputar'
+  'jq: deteksi output monitor untuk MONITOR_MODE=all'
+  'hypridle: pemicu idle di Hyprland'
+  'swayidle: pemicu idle di Sway dan Niri'
+  'libva-utils: laporan profil VA-API di `noctoprevi doctor`'
+  'noctalia-shell: lockscreen lewat `noctalia msg lock`'
+)
+makedepends=()
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# Ganti dengan URL rilis sebenarnya sebelum publikasi:
+# source=("$pkgname-$pkgver.tar.gz")
+# sha256sums=('SKIP')
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver" || return 1
+
+    install -Dm755 bin/noctoprevi "$pkgdir/usr/bin/noctoprevi"
+
+    local lib
+    for lib in core log config media ipc runtime cmd setup aerials; do
+        install -Dm644 "lib/$lib.sh" "$pkgdir/usr/lib/noctoprevi/$lib.sh"
+    done
+
+    install -Dm644 config/config.conf "$pkgdir/usr/share/noctoprevi/config.conf"
+    install -Dm644 config/hypridle.conf.example \
+        "$pkgdir/usr/share/doc/$pkgname/hypridle.conf.example"
+    install -Dm644 config/swayidle.config.example \
+        "$pkgdir/usr/share/doc/$pkgname/swayidle.config.example"
+
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 packaging/noctoprevi.1 "$pkgdir/usr/share/man/man1/noctoprevi.1"
+
+
+    install -Dm644 "$pkgname.install" "$pkgdir/etc/pacman.d/$pkgname.install" 2>/dev/null || true
+
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user-noctoprevi-check.service" <<'UNIT'
+[Unit]
+Description=noctoprevi: verifikasi konfigurasi screensaver
+Documentation=man:noctoprevi(1)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/noctoprevi doctor
+StandardOutput=journal
+UNIT
+}

@@ -1,0 +1,177 @@
+.TH NOCTOPREVI 1 "2026" "noctoprevi 1.0.0" "User Commands"
+.SH NAME
+noctoprevi \- modular Wayland video screensaver
+.SH SYNOPSIS
+.B noctoprevi
+.IR command " [" options ]
+.SH DESCRIPTION
+.B noctoprevi
+menampilkan video sebagai screensaver fullscreen di compositor Wayland
+(Hyprland, Sway, Niri) dan memindahkannya dengan cepat begitu ada input.
+Pemutaran ditangani oleh
+.BR mpv (1)
+dengan akselerasi perangkat keras; perintah antar proses lewat JSON-IPC
+di Unix socket.
+.PP
+Program ini tidak berjalan sendiri. Ia dipicu idle daemon
+.RB ( hypridle (1)
+atau
+.BR swayidle (1))
+saat tidak ada aktivitas, dan dimatikan kembali saat input terdeteksi.
+.SH COMMANDS
+.TP
+.B start
+Nyalakan screensaver. Bila sudah aktif, perintah ini tidak membuat jendela
+kedua (singleton berbasis
+.BR flock (1)).
+.TP
+.B stop
+Matikan screensaver dan bersihkan socket. Keluar dengan kode 0 bila ada yang dimatikan,
+1 bila memang tidak aktif. Target waktu kembalinya ke layar normal di bawah
+150 ms.
+.TP
+.B toggle
+.B start
+kalau sedang mati,
+.B stop
+kalau sedang nyala.
+.TP
+.B next
+Lompat ke clip berikutnya, sesuai
+.BR PLAYBACK_MODE .
+.TP
+.B prev
+Kembali ke clip sebelumnya.
+.TP
+.B status
+Cetak status. Keluar dengan kode 0 bila aktif, 1 bila tidak aktif.
+.TP
+.B doctor
+Periksa dependensi, konfigurasi, socket runtime, dan dukungan akselerasi GPU.
+.TP
+.BI bench " \fR[\fP--runs\fP N\fR]\fP"
+Ulangi siklus start/stop sebanyak
+.I N
+kali dan laporkan latensi
+.BR stop .
+.TP
+.BI install " [\fP--idle-daemon\fP hypridle|swayidle] [\fP--no-config\fP]"
+Tulis blok integrasi ke
+.I ~/.config/hypr/hypridle.conf
+atau
+.IR ~/.config/swayidle/config .
+Blok ditandai agar tidak menimpa setelan lain dan aman dipasang ulang.
+.TP
+.B uninstall
+Lepas blok integrasi, hentikan screensaver, dan bersihkan berkas runtime.
+.TP
+.BI aerials " [" list | \fP--sync\fP ] [\fP--quality\fP q] [\fP--only\fP label] [\fP--jobs\fP N]"
+Kelola koleksi video Apple TV Aerial.
+.TP
+.B version
+Cetak versi.
+.SH OPTIONS
+.TP
+.BI \-\-config " file"
+Pakai berkas konfigurasi lain.
+.TP
+.BR \-q ", " \-\-quiet
+Kurangi keluaran.
+.TP
+.BR \-h ", " \-\-help ", " \-V ", " \-\-version
+Bantuan dan versi.
+.SH EXIT STATUS
+.TP
+.B 0
+Berhasil, atau screensaver sedang aktif.
+.TP
+.B 1
+Screensaver tidak aktif.
+.TP
+.B 2
+Kesalahan runtime (misalnya tidak ada media, atau dependensi hilang).
+.TP
+.B 3
+Kesalahan penggunaan.
+.SH FILES
+.TP
+.I ~/.config/noctoprevi/config.conf
+Konfigurasi. Format
+.IR KEY=VALUE ,
+satu per baris.
+.TP
+.I ~/.config/noctoprevi/videos/
+Direktori video bawaan.
+.TP
+.I $XDG_RUNTIME_DIR/noctoprevi.sock
+Socket JSON-IPC. Bila
+.B $XDG_RUNTIME_DIR
+tidak dapat dipakai, nama berkas diberi akhiran
+.IR -$UID .
+.TP
+.I $XDG_RUNTIME_DIR/noctoprevi.pid
+PID supervisor.
+.TP
+.I $XDG_RUNTIME_DIR/noctoprevi.lock
+Kunci
+.BR flock (1)
+yang menopang status singleton.
+.TP
+.I ~/.local/state/noctoprevi/
+Log bila
+.B LOG_TARGET=file
+.
+.SH ENVIRONMENT
+.TP
+.B XDG_RUNTIME_DIR
+Lokasi socket dan berkas sementara.
+.TP
+.B NOCTOPREVI_MPV
+Path absolut ke binari mpv, menimpa pencarian di
+.BR PATH .
+.TP
+.B NOCTOPREVI_CONFIG_FILE
+Lokasi konfigurasi, menimpa
+.IR $XDG_CONFIG_HOME/noctoprevi/config.conf .
+.SH EXAMPLES
+.PP
+Uji manual:
+.PP
+.RS
+.nf
+noctoprevi start
+noctoprevi status
+noctoprevi next
+noctoprevi stop
+.fi
+.RE
+.PP
+Pasang pemicu idle di Niri atau Sway:
+.PP
+.RS
+.nf
+sudo pacman -S swayidle
+noctoprevi install --idle-daemon swayidle
+swaymsg reload
+.fi
+.RE
+.PP
+Unduh koleksi Aerial dan ukur latensi:
+.PP
+.RS
+.nf
+noctoprevi aerials --sync --quality 1080p
+noctoprevi bench --runs 10
+.fi
+.RE
+.SH SEE ALSO
+.BR mpv (1),
+.BR socat (1),
+.BR hypridle (1),
+.BR swayidle (1),
+.BR flock (1)
+.PP
+Dokumentasi lengkap:
+.IR https://github.com/noctoprevi/noctoprevi
+.SH AUTHORS
+noctoprevi contributors.

@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+#
+# noctoprevi - CLI entry point.
+#
+# Perintah: start | stop | toggle | next | prev | status | doctor |
+#           install | uninstall | aerials | bench | versi
+#
+# Struktur: bin/noctoprevi hanya bootstrap + dispatch,
+# seluruh logika ada di lib/*.sh agar mudah diuji dan di-audit.
+
+set -uo pipefail
+export LC_ALL=C
+
+NC_APP="noctoprevi"
+
+nc_resolve_self() {
+    local src="${BASH_SOURCE[0]}" dir base
+
+    while [ -L "$src" ]; do
+        dir="${src%/*}"
+        [ "$dir" = "$src" ] && dir="$PWD"
+        dir="$(cd -P "$dir" 2>/dev/null && pwd)" || dir="$PWD"
+        src="$(readlink "$src")"
+        case "$src" in
+            /*) ;;
+            *) src="$dir/$src" ;;
+        esac
+    done
+
+    dir="${src%/*}"
+    [ "$dir" = "$src" ] && dir="."
+    dir="$(cd -P "$dir" 2>/dev/null && pwd)" || dir="$PWD"
+
+    NC_BIN_DIR="$dir"
+    NC_SELF="$dir/${src##*/}"
+
+    base="${dir%/*}"
+    [ "$base" = "$dir" ] && base="$dir"
+
+    # Layout yang didukung:
+    #   repo / prefix pengguna : <prefix>/bin/noctoprevi + <prefix>/lib/*.sh
+    #   paket sistem           : /usr/bin/noctoprevi + /usr/lib/noctoprevi/*.sh
+    #   paket dengan prefix    : <prefix>/bin/noctoprevi + <prefix>/lib/noctoprevi/*.sh
+    if [ -r "$base/lib/core.sh" ]; then
+        NC_PREFIX="$base"
+        NC_LIB_DIR="$base/lib"
+    elif [ -r "$base/lib/noctoprevi/core.sh" ]; then
+        NC_PREFIX="$base"
+        NC_LIB_DIR="$base/lib/noctoprevi"
+    elif [ -r "$dir/lib/core.sh" ]; then
+        NC_PREFIX="$dir"
+        NC_LIB_DIR="$dir/lib"
+    elif [ -r "/usr/lib/noctoprevi/core.sh" ]; then
+        NC_PREFIX="/usr"
+        NC_LIB_DIR="/usr/lib/noctoprevi"
+    else
+        NC_ERR_LIB_PATH="$base/lib"
+        return 1
+    fi
+
+    NC_TEMPLATE_DIR="$NC_PREFIX/share/noctoprevi"
+    [ -d "$NC_TEMPLATE_DIR" ] || NC_TEMPLATE_DIR="$base/config"
+    [ -d "$NC_TEMPLATE_DIR" ] || NC_TEMPLATE_DIR="$dir/config"
+    export NOCTOPREVI_TEMPLATE_DIR="$NC_TEMPLATE_DIR"
+    return 0
+}
+
+if ! nc_resolve_self; then
+    printf '%s: modul tidak ditemukan di: %s\n' "$NC_APP" "${NC_ERR_LIB_PATH:-?}" >&2
+    printf '%s: pasang ulang, atau jalankan dari direktori repository\n' "$NC_APP" >&2
+    exit 2
+fi
+
+for _nc_mod in core log config media ipc runtime cmd setup aerials; do
+    _nc_file="$NC_LIB_DIR/$_nc_mod.sh"
+    if [ ! -r "$_nc_file" ]; then
+        printf '%s: modul tidak ditemukan: %s\n' "$NC_APP" "$_nc_file" >&2
+        exit 2
+    fi
+    # shellcheck source=/dev/null
+    . "$_nc_file"
+done
+unset _nc_mod _nc_file
+
+nc_init_paths
+nc_log_init
+nc_config_defaults
+nc_config_load
+nc_config_validate
+nc_log_init
+nc_config_ext_array
+
+nc_usage() {
+    local bin
+    bin="$(basename "$0")"
+    cat <<EOF
+$NC_APP $NC_VERSION - $NC_TAGLINE
+
+PEMAKAIAN
+  $bin <perintah> [opsi]
+
+PERINTAH
+  start            Mulai screensaver video fullscreen (singleton, FR-01)
+  stop             Hentikan screensaver dan bersihkan socket (target <150ms)
+  toggle           Nyala jika mati, mati jika nyala
+  next             Lompat ke video berikutnya
+  prev             Kembali ke video sebelumnya
+  status           Status aktif/tidak (exit 0 = aktif, 1 = tidak aktif)
+  doctor           Periksa dependensi, config, socket, dan akselerasi
+  bench            Ukur latensi stop/start berulang kali
+  install          Pasang integrasi idle (hypridle.conf / swayidle) + config
+  uninstall        Cabot integrasi idle yang dipasang noctoprevi
+  aerials          Kelola koleksi video Aerial Apple
+  version          Tampilkan versi
+
+OPSI
+  -q, --quiet      Hanya kode keluar / output minimal
+  -c, --config F   Pakai file konfigurasi lain
+      --force      Abaikan pemeriksaan lock pada start (risiko jendela ganda)
+  -h, --help       Bantuan ini
+  -V, --version    Versi
+
+KELUAR
+  0  berhasil / screensaver aktif
+  1  screensaver tidak aktif
+  2  kesalahan runtime
+  3  kesalahan penggunaan
+
+CONTOH
+  $bin start
+  $bin status && $bin next
+  $bin stop
+  $bin install --idle-daemon hypridle
+  $bin aerials --sync --quality 1080p
+EOF
+}
+
+nc_cmd_version() {
+    printf '%s %s\n' "$NC_APP" "$NC_VERSION"
+}
+
+nc_main() {
+    local -a rest=()
+    local quiet=0 force=0
+    local cmd=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h | --help)
+                nc_usage
+                exit "$NC_EXIT_OK"
+                ;;
+            -V | --version)
+                nc_cmd_version
+                exit "$NC_EXIT_OK"
+                ;;
+            -q | --quiet)
+                quiet=1
+                shift
+                ;;
+            --force)
+                force=1
+                shift
+                ;;
+            -c | --config)
+                [ "$#" -ge 2 ] || nc_die "opsi --config butuh nilai" "$NC_EXIT_USAGE"
+                NOCTOPREVI_CONFIG_FILE="$2"
+                nc_init_paths
+                nc_config_defaults
+                nc_config_load "$NOCTOPREVI_CONFIG_FILE"
+                nc_config_validate
+                nc_config_ext_array
+                shift 2
+                ;;
+            --)
+                shift
+                rest+=("$@")
+                break
+                ;;
+            -*)
+                nc_die "opsi tidak dikenal: $1" "$NC_EXIT_USAGE"
+                ;;
+            *)
+                if [ -z "$cmd" ]; then
+                    cmd="$1"
+                    shift
+                    if [ "$#" -gt 0 ]; then
+                        rest+=("$@")
+                        break
+                    fi
+                else
+                    rest+=("$1")
+                    shift
+                fi
+                ;;
+        esac
+    done
+
+    [ -n "$cmd" ] || {
+        nc_usage
+        exit "$NC_EXIT_USAGE"
+    }
+
+    NC_FORCE="$force"
+    NC_QUIET="$quiet"
+
+    case "$cmd" in
+        start)
+            nc_cmd_start
+            exit $?
+            ;;
+        stop) nc_cmd_stop; exit $? ;;
+        toggle) nc_cmd_toggle; exit $? ;;
+        next) nc_cmd_next; exit $? ;;
+        prev) nc_cmd_prev; exit $? ;;
+        status) nc_cmd_status "${rest[0]:-}"; exit $? ;;
+        doctor) nc_cmd_doctor; exit $? ;;
+        bench) nc_cmd_bench "${rest[@]}"; exit $? ;;
+        install) nc_cmd_install "${rest[@]}"; exit $? ;;
+        uninstall) nc_cmd_uninstall "${rest[@]}"; exit $? ;;
+        aerials | aerial) nc_cmd_aerials "${rest[@]}"; exit $? ;;
+        version | versi) nc_cmd_version; exit $? ;;
+        *) nc_die "perintah tidak dikenal: $cmd" "$NC_EXIT_USAGE" ;;
+    esac
+}
+
+if [ "${1:-}" = "__supervise" ]; then
+    nc_supervise_main
+    exit $?
+fi
+
+nc_main "$@"

@@ -127,6 +127,25 @@ Kurangi keluaran.
 .TP
 .BR \-h ", " \-\-help ", " \-V ", " \-\-version
 Bantuan dan versi.
+.SH ENVIRONMENT AND CONFIGURATION
+.TP
+.B EXIT_ANIM
+Animasi keluar saat screensaver dimatikan, termasuk waktu pengguna menekan
+space atau enter.
+.IR none " (default), " slideleft ", " slideright ", " slideup ", atau " slidedown .
+Animasi menambah durasi sebelum layar benar-benar bersih: anggaran latensi
+stop yang diukur
+.B bench
+adalah p95 < 150ms, dan
+.B EXIT_ANIM_MS=220
+mendorong total stop ke ~390ms.
+Yang bergeser adalah gambar di dalam jendela, bukan jendela itu - mpv di
+Wayland tidak dapat mengatur posisi jendela, jadi area yang terbuka selama
+animasi berisi warna latar mpv.
+.TP
+.B EXIT_ANIM_MS
+Durasi animasi dalam milidetik, 0 sampai 2000. Default 220.
+.TP
 .SH ANOMALIES
 Setiap kejadian tidak biasa dicatat sebagai satu baris NDJSON dengan
 .I code

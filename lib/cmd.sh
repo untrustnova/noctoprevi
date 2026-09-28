@@ -123,6 +123,27 @@ nc_cmd_stop() {
         return "$NC_EXIT_NOT_RUNNING"
     fi
 
+    # Animasi keluar, kalau diminta. Dijalankan SEBELUM quit supaya mpv
+    # masih punya frame untuk digeser. Default none supaya anggaran latensi
+    # stop yang sudah diukur tidak berubah diam-diam.
+    if [ "$NC_EXIT_ANIM" != "none" ] && [ "$NC_EXIT_ANIM_MS" -gt 0 ] &&
+        [ "${#pids[@]}" -gt 0 ]; then
+        local any_live=0 p=""
+        for p in "${pids[@]}"; do
+            if nc_pid_alive "$p"; then
+                any_live=1
+                break
+            fi
+        done
+        if [ "$any_live" -eq 1 ]; then
+            nc_log_debug "animasi keluar: $NC_EXIT_ANIM ${NC_EXIT_ANIM_MS}ms"
+            for i in "${!socks[@]}"; do
+                nc_ipc_slide "${socks[i]}" "$NC_EXIT_ANIM" "$NC_EXIT_ANIM_MS" &
+            done
+            wait
+        fi
+    fi
+
     for i in "${!socks[@]}"; do
         nc_ipc_quit "${socks[i]}" &
     done

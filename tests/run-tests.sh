@@ -762,6 +762,258 @@ t_latency() {
     t_end
 }
 
+t_msleep_actually_sleeps() {
+    t_begin "nc_msleep benar-benar menunggu (regresi fd timer)"
+    # dulu `exec <>fifo` membuka fd yang NOMORNYA dibuang, jadi NC_TIMER_FD
+    # tetap kosong dan `read -u ""` langsung kembali. Semua nc_msleep di
+    # bawah 1 detik jadi no-op tanpa satu pun error.
+    local out
+    out="$(nc_unit "" '
+        for want in 30 250 1000; do
+            t0="$EPOCHREALTIME"; nc_msleep "$want"; t1="$EPOCHREALTIME"
+            printf "%s %s\n" "$want" "$(( (${t1/./} - ${t0/./}) / 1000 ))"
+        done
+    ')"
+    local got_want="" got_ms="" line
+    while read -r got_want got_ms; do
+        [ -n "$got_want" ] || continue
+        case "$got_want" in
+            30) assert_ge "nc_msleep 30 >= 20ms (aktual ${got_ms}ms)" "$got_ms" "20" ;;
+            250) assert_ge "nc_msleep 250 >= 180ms (aktual ${got_ms}ms)" "$got_ms" "180" ;;
+            1000) assert_ge "nc_msleep 1000 >= 800ms (aktual ${got_ms}ms)" "$got_ms" "800" ;;
+        esac
+    done <<<"$out"
+    t_end
+}
+
+t_exit_anim_filter_accepted() {
+    t_begin "nc_ipc_slide memasang filter crop yang mpv terima"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 30 || { t_skip "butuh ffmpeg"; t_end; return; }
+    local sock="$SANDBOX/exit-anim.sock"
+    rm -f "$sock"
+    mpv --no-config --no-terminal --really-quiet --vo=null --ao=null --no-audio \
+        --input-ipc-server="$sock" --loop-file=inf "$VIDEOS/a.mp4" &
+    local mp=$!
+    sleep 1.5
+    if [ ! -S "$sock" ]; then
+        t_skip "socket IPC tidak muncul"
+        kill "$mp" 2>/dev/null
+        wait "$mp" 2>/dev/null
+        t_end
+        return
+    fi
+
+    local out
+    out="$(nc_unit "SOCK='$sock'" '
+        nc_ipc_slide "$SOCK" slideleft 120
+        nc_ipc_request "$SOCK" "{\"command\":[\"get_property\",\"vf\"],\"request_id\":90}" 0.8 2>/dev/null
+    ')"
+    assert_contains "slideleft memasang filter crop" "$out" '"name":"crop"'
+    assert_contains "slideleft menggeser sumbu x" "$out" '"x":"iw*'
+    assert_not_contains "sumbu y tidak disentuh" "$out" '"y":"ih*'
+
+    out="$(nc_unit "SOCK='$sock'" '
+        nc_ipc_slide "$SOCK" slideup 120
+        nc_ipc_request "$SOCK" "{\"command\":[\"get_property\",\"vf\"],\"request_id\":91}" 0.8 2>/dev/null
+    ')"
+    assert_contains "slideup menggeser sumbu y" "$out" '"y":"ih*'
+    assert_not_contains "sumbu x tidak disentuh" "$out" '"x":"iw*'
+
+    out="$(nc_unit "SOCK='$sock'" '
+        nc_ipc_request "$SOCK" "{\"command\":[\"get_property\",\"path\"],\"request_id\":92}" 0.8 2>/dev/null
+    ')"
+    assert_contains "mpv masih hidup setelah animasi" "$out" "$VIDEOS/a.mp4"
+    kill "$mp" 2>/dev/null
+    wait "$mp" 2>/dev/null
+    t_end
+}
+
+t_exit_anim_probe() {
+    # $1 = nilai EXIT_ANIM, $2 = nilai EXIT_ANIM_MS -> "anim/ms" setelah load
+    local a="$1" m="$2"
+    nc_unit "A='$a'; M='$m'" '
+        mkdir -p "$(dirname "$NC_CONFIG_FILE")"
+        printf "EXIT_ANIM=%s\nEXIT_ANIM_MS=%s\n" "$A" "$M" >"$NC_CONFIG_FILE"
+        NC_EXIT_ANIM=x; NC_EXIT_ANIM_MS=x
+        nc_config_load
+        printf "%s/%s" "$NC_EXIT_ANIM" "$NC_EXIT_ANIM_MS"
+    ' 2>/dev/null
+}
+
+t_exit_anim_defaults_and_validation() {
+    t_begin "EXIT_ANIM: default none + validasi nilai"
+    local out
+    out="$(nc_unit "" 'printf "%s/%s" "$NC_EXIT_ANIM" "$NC_EXIT_ANIM_MS"')"
+    assert_eq "default none/220" "$out" "none/220"
+
+    out="$(t_exit_anim_probe diagonal 200)"
+    assert_eq "EXIT_ANIM tak dikenal -> none" "$out" "none/200"
+
+    out="$(t_exit_anim_probe slideleft 9999)"
+    assert_eq "EXIT_ANIM_MS di atas batas -> 220" "$out" "slideleft/220"
+
+    out="$(t_exit_anim_probe slideleft abc)"
+    assert_eq "EXIT_ANIM_MS bukan angka -> 220" "$out" "slideleft/220"
+
+    out="$(t_exit_anim_probe slideup 300)"
+    assert_eq "nilai sah dipertahankan" "$out" "slideup/300"
+
+    out="$(t_exit_anim_probe off 300)"
+    assert_eq "off dinormalkan ke none" "$out" "none/300"
+    t_end
+}
+
+# Varian swayidle: i3 (tanpa -t, config satu baris) vs upstream (pakai -t,
+# config keyword). Menebak yang salah bikin swayidle keluar tanpa error yang
+# terlihat, jadi kedua cabang harus diuji.
+# Test terkuat untuk blok swayidle: jalankan swayidle sungguhan terhadap
+# config hasil generate dan pastikan tidak ada error parse. Inilah yang
+# menangkap regresi `exec_while_idle` - bug yang tidak terlihat dari log
+# mana pun karena swayidle menolak config lalu keluar dengan diam-diam.
+t_swayidle_block_parses() {
+    t_begin "config swayidle hasil generate benar-benar bisa di-parse swayidle"
+    if ! command -v swayidle >/dev/null 2>&1; then
+        t_skip "swayidle tidak terpasang"
+        t_end
+        return
+    fi
+    local probe="$SANDBOX/swayidle-probe.conf"
+    nc_unit "NC_IDLE_START_SEC=600; NC_IDLE_LOCK_SEC=1200" '
+        mkdir -p "$(dirname "'"$probe"'")"
+        nc_swayidle_block >"'"$probe"'"
+    '
+    if [ ! -s "$probe" ]; then
+        assert_ok "config hasil generate tidak kosong" false
+        t_end
+        return
+    fi
+
+    local out rc
+    out="$(timeout 3 swayidle -C "$probe" -d 2>&1)"
+    rc="$?"
+    # rc 124 = timeout, artinya swayidle happily jalan (bagus, itu yang kita mau)
+    # rc tidak dikunci: swayidle butuh portal idle yang tidak selalu ada di
+    # lingkungan test. Yang penting: config-nya DITERIMA, bukan ditolak.
+    assert_contains "timeout terdaftar dari config" "$out" "Register idle timeout"
+    assert_not_contains "tanpa Unexpected keyword" "$out" "Unexpected keyword"
+    assert_not_contains "tanpa Too few parameters" "$out" "Too few parameters"
+    assert_not_contains "tanpa Invalid timeout" "$out" "Invalid timeout"
+    assert_not_contains "tanpa error config" "$out" "has errors"
+    t_end
+}
+
+t_swayidle_block_variant() {
+    t_begin "blok swayidle menyesuaikan varian swayidle yang terpasang"
+    local idetected
+    idetected="$(nc_unit "" 'nc_swayidle_variant' 2>/dev/null)"
+    assert_ok "varian terdeteksi: $idetected" true
+
+    local i3 upstream
+    # Argumen kedua harus ditulis eksplisit: nc_unit memakai `local body="$2"`
+    # di bawah `set -u`, jadi satu argumen saja berarti unbound variable.
+    i3="$(nc_unit "NC_IDLE_START_SEC=600; NC_IDLE_LOCK_SEC=1200
+        nc_swayidle_variant() { printf 'i3'; }
+        nc_swayidle_block" '' 2>/dev/null)"
+    upstream="$(nc_unit "NC_IDLE_START_SEC=600; NC_IDLE_LOCK_SEC=1200
+        nc_swayidle_variant() { printf 'upstream'; }
+        nc_swayidle_block" '' 2>/dev/null)"
+
+    # --- varian i3: satu baris "timeout N start resume stop" ---
+    assert_contains "i3: timeout dengan detik" "$i3" "timeout 600"
+    # Kutip itu wajib: tanpa kutip swayidle hanya mengambil "noctoprevi"
+    # dan membuang "start"-nya.
+    assert_contains "i3: perintah start diapit kutip" "$i3" '"noctoprevi start"'
+    assert_contains "i3: perintah stop diapit kutip" "$i3" '"noctoprevi stop"'
+    assert_contains "i3: ada direktif resume" "$i3" "resume"
+    assert_not_contains "i3: tanpa exec_always" "$i3" "exec_always"
+    assert_not_contains "i3: tanpa exec_on_idle" "$i3" "exec_on_idle"
+    assert_not_contains "i3: tanpa tanda = di timeout" "$i3" "timeout ="
+
+    # --- varian upstream: hanya keyword yang swayidle terima ---
+    local directives="" line key
+    while read -r line; do
+        case "$line" in
+            '#'* | '' | *'>>>'* | *'<<<'*) continue ;;
+        esac
+        directives="$directives$line"$'\n'
+    done <<<"$upstream"
+    # Keyword `timeout` di config berarti "timeout <detik> <perintah>",
+    # bukan pengaturan idle - flag -t yang mengaturnya. Kalau ada di
+    # config, swayidle keluar dengan "Too few parameters".
+    assert_not_contains "upstream: tanpa keyword timeout" "$directives" "timeout"
+
+    local -a valid=(exec exec_always exec_on_idle
+        exec_idle_deadline exec_on_resume)
+    local found v
+    while read -r line; do
+        [ -n "$line" ] || continue
+        # `read` lebih aman daripada trim manual: "exec_always = x" punya
+        # spasi sebelum tanda sama dengan.
+        read -r key _rest <<<"$line"
+        found=0
+        for v in "${valid[@]}"; do
+            [ "$key" = "$v" ] && found=1 && break
+        done
+        if [ "$found" -eq 1 ]; then
+            assert_ok "upstream: keyword '$key' valid" true
+        else
+            assert_eq "upstream: keyword '$key' DITOLAK" "$key" "<salah satu: ${valid[*]}>"
+        fi
+    done <<<"$directives"
+    assert_contains "upstream: exec_always untuk start" "$directives" "exec_always ="
+    assert_not_contains "upstream: tanpa exec_while_idle" "$directives" "exec_while_idle"
+
+    # Blok yang benar-benar terpasang harus ikut varian yang terdeteksi
+    local real
+    real="$(nc_unit "NC_IDLE_START_SEC=600; NC_IDLE_LOCK_SEC=1200" 'nc_swayidle_block')"
+    if [ "$idetected" = "i3" ]; then
+        assert_contains "blok terpasang ikut varian i3" "$real" "resume"
+        assert_not_contains "blok terpasang bukan upstream" "$real" "exec_always"
+    else
+        assert_contains "blok terpasang ikut upstream" "$real" "exec_always ="
+    fi
+    t_end
+}
+
+t_mpv_releases_keyboard() {
+    t_begin "mpv tidak memegang keyboard (syarat EXIT_ANIM jalan)"
+    need_mpv || return
+    make_clip "$VIDEOS/a.mp4" 30 || { t_skip "butuh ffmpeg"; t_end; return; }
+    nc_write_config "VIDEO_DIR=$VIDEOS" 'VALIDATE_MEDIA=0'
+    runq start
+    sleep 1.2
+    assert_eq "mpv hidup" "$(mpv_count)" "1"
+
+    local argv="" pid
+    pid="$(cat "$XDG_RUNTIME_DIR/noctoprevi.0.pid" 2>/dev/null)"
+    if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+        argv="$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null)"
+    fi
+    if [ -z "$argv" ]; then
+        t_skip "tidak bisa baca argv mpv (/proc tidak tersedia)"
+        runq stop
+        t_end
+        return
+    fi
+    assert_contains "binding keyboard dimatikan" "$argv" "--input-default-bindings=no"
+    assert_contains "keyboard VO dimatikan" "$argv" "--input-vo-keyboard=no"
+    t_ok "tekan tombol akan lolos ke compositor -> swayidle -> stop"
+    runq stop
+    t_end
+}
+
+t_exit_anim_unknown_returns_ok() {
+    t_begin "nc_ipc_slide mode tak dikenal = no-op, bukan error"
+    local out
+    out="$(nc_unit "SOCK='$SANDBOX/tidak-ada.sock'" '
+        nc_ipc_slide "$SOCK" diagonal 100
+        printf "rc=%s" "$?"
+    ' 2>&1)"
+    assert_contains "keluar dengan 0" "$out" "rc=0"
+    t_end
+}
+
 t_signal_kills_children() {
     t_begin "SIGTERM ke supervisor bunuh anak mpv"
     need_mpv || return
@@ -1146,7 +1398,17 @@ t_idle_generated_matches_config() {
 
     runq install --idle-daemon swayidle
     out="$(cat "$XDG_CONFIG_HOME/swayidle/config" 2>/dev/null)"
-    assert_contains "swayidle sleep ikut custom" "$out" "sleep $(( lock + 222 ));"
+    # Varian swayidle punya format config yang tidak kompatibel, jadi
+    # nilai yang bisa carried berbeda. Yang wajib ikut custom adalah
+    # timeout idle; lock 1200-detik hanya bisa dinyatakan di varian
+    # upstream (format i3 cuma punya satu perintah timeout).
+    local variant
+    variant="$(nc_unit "" 'nc_swayidle_variant' 2>/dev/null)"
+    if [ "$variant" = "i3" ]; then
+        assert_contains "swayidle timeout ikut custom (i3)" "$out" "timeout $(( start + 111 ))"
+    else
+        assert_contains "swayidle sleep ikut custom" "$out" "sleep $(( lock + 222 ));"
+    fi
     t_end
 }
 
@@ -1860,8 +2122,14 @@ t_idle_swayidle() {
     if [ -f "$conf" ]; then
         local c
         c="$(cat "$conf")"
-        assert_contains "exec_while_idle" "$c" "exec_while_idle = noctoprevi start"
-        assert_contains "exec_on_resume" "$c" "exec_on_resume = noctoprevi stop"
+        # Varian-agnostic: dua varian swayidle punya config yang tidak
+        # kompatibel, jadi yang diuji di sini isi blok. Validitas sintaksnya
+        # diuji terpisah terhadap swayidle sungguhan.
+        assert_contains "perintah start ada" "$c" "start"
+        assert_contains "perintah stop ada" "$c" "stop"
+        # exec_while_idle bukan keyword swayidle; kalau muncul, swayidle
+        # menolak seluruh config lalu keluar tanpa pesan yang terlihat.
+        assert_not_contains "tanpa keyword ngawur" "$c" "exec_while_idle = "
     fi
     t_end
 }
@@ -1870,11 +2138,12 @@ t_idle_preserves_user_config() {
     t_begin "install menjaga konfigurasi lama"
     local conf="$XDG_CONFIG_HOME/swayidle/config"
     mkdir -p "${conf%/*}"
-    printf 'timeout=600\nexec_while_idle=htop\n' >"$conf"
+    printf 'timeout=600\n# catatan milik user\nbaris=ngawur\n' >"$conf"
     runq install --idle-daemon swayidle
     local c
     c="$(cat "$conf" 2>/dev/null)"
-    assert_contains "baris lama utuh" "$c" "exec_while_idle=htop"
+    assert_contains "baris lama utuh" "$c" "baris=ngawur"
+    assert_contains "baris lain utuh" "$c" "# catatan milik user"
     assert_contains "blok baru ditambahkan" "$c" "noctoprevi stop"
     t_end
 }
@@ -2044,6 +2313,10 @@ ALL_TESTS=(
     t_shuffle_actually_random t_missing_media_midplay t_all_media_deleted
     t_lifecycle t_singleton t_concurrent_start t_toggle
     t_invalid_media_recovery t_all_broken_media t_next_without_running
+    t_msleep_actually_sleeps t_exit_anim_filter_accepted \
+        t_exit_anim_defaults_and_validation t_exit_anim_unknown_returns_ok \
+        t_mpv_releases_keyboard t_swayidle_block_variant \
+        t_swayidle_block_parses
     t_signal_kills_children t_start_reports_supervisor_failure
     t_latency t_stop_repeated t_stop_orphan_recovery
     t_stale_socket t_ipc_dead_socket

@@ -52,8 +52,13 @@ nc_timer_init() {
     local fifo="${TMPDIR:-/tmp}/.nocotimer.$$"
     command -v mkfifo >/dev/null 2>&1 || return 1
     mkfifo "$fifo" 2>/dev/null || return 1
-    if ! eval "exec ${NC_TIMER_FD}<>\"\$fifo\"" 2>/dev/null; then
+    # PENTING: harus `exec {NC_TIMER_FD}<>`, bukan `exec <>`.
+    # Bentuk `exec <>file` membuka fd baru yang NOMORNYA dibuang, jadi
+    # NC_TIMER_FD tetap kosong dan `read -u ""` langsung kembali tanpa
+    # menunggu - artinya setiap nc_msleep di bawah 1 detik jadi no-op.
+    if ! eval "exec {NC_TIMER_FD}<>\"\$fifo\"" 2>/dev/null; then
         rm -f "$fifo" 2>/dev/null
+        NC_TIMER_FD=""
         return 1
     fi
     rm -f "$fifo" 2>/dev/null
@@ -61,25 +66,31 @@ nc_timer_init() {
 }
 
 nc_msleep() {
-    local ms="$1" d
+    local ms="$1" d=""
+
+    # >= 1 detik: pakai `sleep` langsung. PENTING: jangan `sleep "$ms"` -
+    # argumen sleep adalah SATUAN, jadi `nc_msleep 2000` akan tidur 2000
+    # detik. Nilai ms dipisah jadi detik + pecahan.
     case "$ms" in
-        1) d=0.001 ;;
-        2) d=0.002 ;;
-        5) d=0.005 ;;
-        10) d=0.01 ;;
-        20) d=0.02 ;;
-        25) d=0.025 ;;
-        30) d=0.03 ;;
-        50) d=0.05 ;;
-        100) d=0.1 ;;
-        *)
-            sleep "$ms" 2>/dev/null || sleep 1
+        '' | *[!0-9]*)
+            sleep 1 2>/dev/null || sleep 1
             return 0
             ;;
     esac
+    if [ "$ms" -ge 1000 ]; then
+        sleep "$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))" 2>/dev/null ||
+            sleep "$(printf '%d' $((ms / 1000)))" 2>/dev/null ||
+            sleep 1
+        return 0
+    fi
+
+    # < 1 detik: butuh timer fd. printf '%03d' menambah nol di depan supaya
+    # `0.5` tidak jadi `0.5` -> read -t mau `0.5` yang valid, tapi `0.050`
+    # untuk 50ms harus punya 3 desimal.
+    d="$(printf '0.%03d' "$ms")"
     if [ -z "$NC_TIMER_FD" ]; then
         nc_timer_init || {
-            sleep "$d" 2>/dev/null
+            sleep "$d" 2>/dev/null || sleep 1
             return 0
         }
     fi

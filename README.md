@@ -53,15 +53,43 @@ Dirancang untuk CachyOS + Noctalia Shell, jalan juga di Hyprland, Sway, dan Niri
 - **`noctoprevi check`** — preflight. `doctor` menjawab "dependensi ada?";
   `check` menjawab "ini benar-benar akan jalan?" — decode nyata 20 frame,
   validasi ambang idle, cek izin socket, cek jumlah output aktif.
-- **`noctoprevi selftest`** — pola uji (SMPTE bars + penanda bergerak) per
-  output, supaya multi-monitor bisa dibuktikan bukan ditebak. Ini untuk
-  Phase 2 nanti, saat `MONITOR_MODE=all` diuji dengan dua monitor.
+- **`noctoprevi selftest`** — pola uji (SMPTE bars + penanda bergerak) dengan
+  label `[0]`, `[1]`, ... di pojok kiri tiap monitor, lalu **menutup sendiri**
+  setelah durasi yang diminta. Tidak perlu Ctrl-C atau Enter. Tujuannya
+  membuktikan multi-monitor bukan menebaknya. Konfigurasimu dicadukan dulu
+  dan dipulihkan keluar, termasuk kalau prosesnya dihentikan paksa.
 - **`noctoprevi watch`** — panel status yang memperbarui diri tiap 2 detik.
 - TUI dan `watch` menolak jalan kalau bukan terminal, mengembalikan kursor
   saat keluar, dan menghormati `NO_COLOR`. Tiga hal yang belum ada di
   nocatoo tapi penting untuk tool yang sering dipanggil daemon.
 - Notifikasi desktop untuk anomali `error`/`security`, dibatasi satu per
   jendela waktu (`ANOMALY_NOTIFY`, default mati).
+
+- **Animasi keluar (`EXIT_ANIM`)**. Waktu kamu menekan space atau enter untuk
+  membangunkan screensaver, gambarnya bisa digeser keluar dulu sebelum jendela
+  tertutup, supaya tidak terasa mati mendadak. `none` (default),
+  `slideleft`, `slideright`, `slideup`, `slidedown`.
+
+  ```bash
+  # config.conf
+  EXIT_ANIM=slideleft
+  EXIT_ANIM_MS=220
+  ```
+
+  Default `none` bukan karena animasinya jelek, tapi karena ada harga yang
+  harus disebut terang-terangan: anggaran latensi stop di `bench` adalah
+  p95 < 150ms, dan animasi 220ms mendorong total stop ke ~390ms. Yang
+  bergeser adalah gambar di dalam jendela, bukan jendela itu - mpv di Wayland
+  tidak bisa mengatur posisi jendela, jadi area yang terbuka berisi warna
+  latar mpv.
+
+- **Perbaikan `nc_msleep`.** Semua `nc_msleep` di bawah 1 detik tadinya
+  diam-diam jadi no-op: `nc_timer_init` membuka fd timer dengan
+  `exec <>fifo`, yang membuang nomor fd-nya, jadi `NC_TIMER_FD` tetap kosong
+  dan `read -u ""` langsung kembali. Tanpa error, tanpa warning - loop
+  pengaman saat itu cuma berputar. Sekarang pakai
+  `exec {NC_TIMER_FD}<>`, dan fallback milidetik tidak lagi mengirim
+  milidetik ke `sleep` (yang akan tidur 2000 *detik*).
 
 ### 1.0.1
 

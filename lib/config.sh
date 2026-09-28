@@ -6,7 +6,7 @@
 # Nilai boleh diapit ' atau ". Baris kosong diabaikan.
 # Key yang tidak dikenal dicatat sebagai warning, bukan error.
 
-NC_CFG_KEYS="START_WARN_MS STOP_WARN_MS ANOMALY_ENABLED ANOMALY_MAX_LINES ANOMALY_NOTIFY ANOMALY_NOTIFY_INTERVAL VIDEO_FPS_LIMIT MIN_DURATION_SEC AERIALS_TRUST AERIALS_CURL_ARGS STOP_IPC_WAIT_MS VIDEO_DIR PLAYBACK_MODE VIDEO_EXTENSIONS VIDEO_RECURSIVE VALIDATE_MEDIA RETRY_LIMIT STARTUP_GRACE_MS HWDEC AUDIO LOOP_FILE CURSOR_AUTOHIDE FULLSCREEN BORDER OSD_LEVEL MONITOR_MODE MPV_ARGS EXTRA_MPV_ARGS LOG_LEVEL LOG_TARGET LOG_FILE LOG_MAX_LINES IDLE_START_SEC IDLE_LOCK_SEC AERIALS_QUALITY AERIALS_DIR MAX_INSTANCES"
+NC_CFG_KEYS="START_WARN_MS STOP_WARN_MS ANOMALY_ENABLED ANOMALY_MAX_LINES ANOMALY_NOTIFY ANOMALY_NOTIFY_INTERVAL VIDEO_FPS_LIMIT MIN_DURATION_SEC AERIALS_TRUST AERIALS_CURL_ARGS STOP_IPC_WAIT_MS EXIT_ANIM EXIT_ANIM_MS VIDEO_DIR PLAYBACK_MODE VIDEO_EXTENSIONS VIDEO_RECURSIVE VALIDATE_MEDIA RETRY_LIMIT STARTUP_GRACE_MS HWDEC AUDIO LOOP_FILE CURSOR_AUTOHIDE FULLSCREEN BORDER OSD_LEVEL OSD_MSG_FILE MONITOR_MODE MPV_ARGS EXTRA_MPV_ARGS LOG_LEVEL LOG_TARGET LOG_FILE LOG_MAX_LINES IDLE_START_SEC IDLE_LOCK_SEC AERIALS_QUALITY AERIALS_DIR MAX_INSTANCES"
 
 nc_config_defaults() {
     NC_VIDEO_DIR="${NC_CONFIG_DIR:-$HOME/.config/$NC_APP}/videos"
@@ -24,6 +24,7 @@ nc_config_defaults() {
     NC_FULLSCREEN=1
     NC_BORDER=0
     NC_OSD_LEVEL=0
+    NC_OSD_MSG_FILE=""
     NC_VIDEO_FPS_LIMIT=0
     NC_ANOMALY_ENABLED=1
     NC_START_WARN_MS=1500
@@ -36,6 +37,8 @@ nc_config_defaults() {
     NC_EXTRA_MPV_ARGS=""
     NC_LOG_MAX_LINES=2000
     NC_STOP_IPC_WAIT_MS=20
+    NC_EXIT_ANIM="none"
+    NC_EXIT_ANIM_MS=220
     NC_IDLE_START_SEC=600
     NC_IDLE_LOCK_SEC=1200
     NC_AERIALS_QUALITY="1080p"
@@ -166,6 +169,25 @@ nc_config_apply() {
             ;;
         OSD_LEVEL)
             if nc_config_is_int "$v"; then NC_OSD_LEVEL="$v"; else NC_OSD_LEVEL=0; fi
+            ;;
+        OSD_MSG_FILE) NC_OSD_MSG_FILE="$v" ;;
+        EXIT_ANIM)
+            case "${v,,}" in
+                none | off | 0 | false) NC_EXIT_ANIM="none" ;;
+                slideleft | slideright | slideup | slidedown) NC_EXIT_ANIM="${v,,}" ;;
+                *)
+                    nc_log_warn "EXIT_ANIM tidak dikenal: '$v' -> none"
+                    NC_EXIT_ANIM="none"
+                    ;;
+            esac
+            ;;
+        EXIT_ANIM_MS)
+            if nc_config_is_int "$v" && [ "$v" -ge 0 ] && [ "$v" -le 2000 ]; then
+                NC_EXIT_ANIM_MS="$v"
+            else
+                nc_log_warn "EXIT_ANIM_MS tidak valid: '$v' -> 220"
+                NC_EXIT_ANIM_MS=220
+            fi
             ;;
         START_WARN_MS)
             if nc_config_is_int "$v"; then NC_START_WARN_MS="$v"; else NC_START_WARN_MS=1500; fi

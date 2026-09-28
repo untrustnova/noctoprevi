@@ -19,7 +19,7 @@ optdepends=(
 )
 makedepends=()
 source=("noctoprevi-${pkgver}.tar.gz")
-sha256sums=('5046bb8da8c23a768eb1e29918abfd6bde2885bc96d70639b291cf3691226058')
+sha256sums=('2f298082fe95501ac3ed2933d436457463c6b03f8d60e779e5f34d1fec3af726')
 
 # Versi dibaca dari lib/core.sh supaya tidak ada nomor yang dobel di dua
 # tempat. Kalau keduanya tidak cocok, build berhenti dengan pesan jelas -

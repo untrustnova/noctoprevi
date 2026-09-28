@@ -211,7 +211,38 @@ nc_build_mpv_argv() {
     NC_ARGV+=(--force-window=immediate)
     NC_ARGV+=(--no-keepaspect)
     NC_ARGV+=(--no-input-terminal)
+
+    # Jangan biarkan mpvاطئ keyboard dari pengguna. Dua flag ini yang
+    # menentukan apakah animasi keluar boleh terjadi.
+    #
+    # Tanpa keduanya, tekanan pertamaxis yang masuk ke mpv, bukan ke
+    # compositor. swayidle tidak pernah melihat "resume", jadi
+    # `noctoprevi stop` tidak pernah dipanggil dan animasi EXIT_ANIM tidak
+    # pernah jalan. Lebih buruk, `q` adalah binding bawaan mpv untuk quit:
+    # mpv mati mendadak tanpa animasi, dan `space` cuma jadi pause - video
+    # diam, bukan hilang. Itu persis kebalikan dari yang diinginkan.
+    #
+    # Setelah flag ini, setiap tekan tombol langsung ke compositor -> swayidle
+    # melihat resume -> stop dengan animasi. Harga: mpv tidak lagi bisa
+    # dikontrol lewat keyboard, tapi `noctoprevi next`/`prev` sudah ada.
+    NC_ARGV+=(--input-default-bindings=no)
+    NC_ARGV+=(--input-vo-keyboard=no)
+
     NC_ARGV+=(--osd-level="$NC_OSD_LEVEL")
+
+    # Label per-instance. Semua instance memutar BERKAS YANG SAMA, jadi isi
+    # videonya tidak bisa membedakan monitor mana yang mana - yang bisa
+    # membedakan cuma teks yang digambar mpv ke jendela instance itu
+    # sendiri. Dipakai `selftest` untuk memverifikasi multi-monitor.
+    if [ -n "${NC_OSD_MSG_FILE:-}" ] && [ "$NC_OSD_LEVEL" -gt 0 ]; then
+        local -a osd_lines=()
+        if [ -f "$NC_OSD_MSG_FILE" ]; then
+            mapfile -t osd_lines <"$NC_OSD_MSG_FILE" 2>/dev/null || osd_lines=()
+        fi
+        if [ -n "${osd_lines[idx]:-}" ]; then
+            NC_ARGV+=("--osd-msg1=${osd_lines[idx]}")
+        fi
+    fi
 
     # Batas fps. PENTING: ini bukan penghematan decode. VA-API tetap
     # men-decode semua frame; yang berkurang hanya pemrosesan presentasi.
